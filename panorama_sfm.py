@@ -361,8 +361,6 @@ def render_perspective_images(
                 f.write(f"{img_name} {mpath}\n")
     except Exception:
         pass
-=======
->>>>>>> origin/main
 
     return rig_config
 
@@ -406,25 +404,7 @@ def run(args):
         export_xmp=bool(getattr(args, 'export_rc_xmp', False)),
     )
 
-    # --- Flatten images and masks for RealityCapture ---
-    try:
-        rc_dir = args.output_path / "RC"
-        rc_dir.mkdir(exist_ok=True, parents=True)
-        img_count = 0
-        mask_count = 0
-        # Copy images (flat)
-        for p in image_dir.rglob("*"):
-            if p.is_file():
-                shutil.copy2(p, rc_dir / p.name)
-                img_count += 1
-        # Copy masks (flat)
-        for p in mask_dir.rglob("*"):
-            if p.is_file():
-                shutil.copy2(p, rc_dir / p.name)
-                mask_count += 1
-        logging.info(f"RC export: copied {img_count} images and {mask_count} masks into {rc_dir}")
-    except Exception as e:
-        logging.warning(f"RC export step failed: {e}")
+    # (RC flatten export removed; keep folder structure intact)
 
     pycolmap.set_random_seed(0)
 
@@ -433,18 +413,11 @@ def run(args):
     extraction_options.use_gpu = True
     extraction_options.gpu_index = "0"
 
-<<<<<<< HEAD
     # Use legacy mask_path pointing to output/colmap_masks for compatibility
     pycolmap.extract_features(
         database_path,
         image_dir,
         reader_options={"mask_path": args.output_path / "colmap_masks"},
-=======
-    pycolmap.extract_features(
-        database_path,
-        image_dir,
-        reader_options={"mask_path": mask_dir},
->>>>>>> origin/main
         sift_options=extraction_options,
         camera_mode=pycolmap.CameraMode.PER_FOLDER,
     )
