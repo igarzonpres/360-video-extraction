@@ -86,6 +86,7 @@ frame_interval = None
 drop_zone = None
 run_btn = None
 browse_btn = None
+output_dir_var = None
 
 def ui_status(msg: str):
     status_var.set(msg)
@@ -432,14 +433,14 @@ def run_yolo_masking(frames_root: Path) -> int:  # type: ignore[override]
 # External steps (threaded helpers)
 # =========================
 
-def run_panorama_sfm(project_root: Path) -> bool:
+def run_panorama_sfm(project_root: Path, output_root: Path) -> bool:
     wrapper = Path(__file__).parent / "run_panorama_sfm.py"
     if not wrapper.exists():
         ui_log(f"[ERROR] Missing run_panorama_sfm.py next to the GUI: {wrapper}")
         return False
 
     # Build wrapper command and pass optional XMP export
-    cmd = [sys.executable, str(wrapper), str(project_root)]
+    cmd = [sys.executable, str(wrapper), str(project_root), "--output_path", str(output_root)]
     try:
         if export_rc_xmp.get():
             cmd.append("--export_rc_xmp")
@@ -485,13 +486,14 @@ def run_panorama_sfm(project_root: Path) -> bool:
 
 
 
-def delete_pano_camera0(project_root: Path) -> None:
+def delete_pano_camera0(project_root: Path, output_root: Path) -> None:
     deleter = Path(__file__).parent / "delete_pano0.py"
     if not deleter.exists():
         ui_log(f"[WARN] Missing delete_pano0.py (skipping): {deleter}")
         return
 
-    cmd = [sys.executable, str(deleter), str(project_root)]
+    # Pass output_root so the script can delete under <output_root>/images
+    cmd = [sys.executable, str(deleter), str(output_root)]
     ui_log(f"[RUN] {' '.join(cmd)}")
     ui_status("Deleting pano_camera0 folders…")
     ui_sub_progress(indeterminate=True)
@@ -503,14 +505,15 @@ def delete_pano_camera0(project_root: Path) -> None:
         ui_sub_progress(0, indeterminate=False)
         ui_log(f"[WARN] delete_pano0.py reported an error: {e}")
 
-def run_segment_images(project_root: Path) -> bool:
+def run_segment_images(project_root: Path, output_root: Path) -> bool:
     """Run segment_images.py at the end, only needed when multiple input videos were used."""
     seg = Path(__file__).parent / "segment_images.py"
     if not seg.exists():
         ui_log(f"[WARN] Missing segment_images.py (skipping): {seg}")
         return False
 
-    cmd = [sys.executable, str(seg)]
+    # Pass output_root so the script reads from <output_root>/images and writes under it
+    cmd = [sys.executable, str(seg), str(output_root)]
     ui_log(f"[RUN] {' '.join(cmd)} (cwd={project_root})")
     ui_status("Segmenting COLMAP images by clip prefix…")
     ui_sub_progress(indeterminate=True)
@@ -537,6 +540,13 @@ def pipeline_thread(project_root: Path, seconds_per_frame: float, masking_enable
         ui_status("Preparing extraction…")
         video_count = extract_frames_with_progress(project_root, seconds_per_frame)
         frames_root = project_root / "frames"
+        # Determine output root from UI (default to <project_root>/output if empty)
+        try:
+            out_root_str = output_dir_var.get().strip()
+            output_root = Path(out_root_str) if out_root_str else (project_root / "output")
+        except Exception:
+            output_root = project_root / "output"
+        output_root.mkdir(parents=True, exist_ok=True)
 
         # Phase B: Angles & optional masking (no UI variables)
         if masking_enabled:
@@ -556,20 +566,20 @@ def pipeline_thread(project_root: Path, seconds_per_frame: float, masking_enable
         ui_main_progress(33, indeterminate=False)
 
         # Phase C: COLMAP (stream logs into GUI)
-        if not run_panorama_sfm(project_root):
+        if not run_panorama_sfm(project_root, output_root):
             ui_status("COLMAP failed. See log.")
             return
 
         ui_main_progress(66, indeterminate=False)
 
         # Phase D: Delete pano_camera0
-        delete_pano_camera0(project_root)
+        delete_pano_camera0(project_root, output_root)
         ui_main_progress(90, indeterminate=False)
 
         # Phase E: Segment images if more than one video
         if video_count > 1:
             ui_log(f"[INFO] Multiple videos detected ({video_count}). Running segment_images…")
-            run_segment_images(project_root)
+            run_segment_images(project_root, output_root)
 
         ui_main_progress(100, indeterminate=False)
         ui_status("All done.")
@@ -634,7 +644,7 @@ def on_masking_toggle():
 
 def main():
     global _root, status_var, progress_main, progress_sub, log_text
-    global use_masking, frame_interval, drop_zone, run_btn, browse_btn
+    global use_masking, frame_interval, drop_zone, run_btn, browse_btn, output_dir_var
     global export_rc_xmp
     global yolo_model_path, yolo_conf, yolo_dilate_px, yolo_invert_mask, yolo_apply_to_rgb, _yolo_widgets
 
@@ -686,6 +696,19 @@ def main():
         selectcolor="black",
     )
     mcb.pack(side="left")
+
+    # Output folder chooser
+    out_ctrl = Frame(_root, bg="black")
+    out_ctrl.pack(pady=(6, 2))
+    Label(out_ctrl, text="Output folder:", bg="black", fg="white").pack(side="left")
+    output_dir_var = StringVar(value="")
+    out_entry = Entry(out_ctrl, textvariable=output_dir_var, width=56)
+    out_entry.pack(side="left", padx=(6, 6))
+    def choose_output_dir():
+        chosen = filedialog.askdirectory(title="Select output root folder")
+        if chosen:
+            output_dir_var.set(chosen)
+    Button(out_ctrl, text="Browse…", command=choose_output_dir).pack(side="left")
 
     # XMP export toggle
     export_rc_xmp = BooleanVar(value=False)
