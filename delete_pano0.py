@@ -16,15 +16,11 @@ def delete_all_pano_camera0(source_dir: Path):
         print(f"✅ Deleted {deleted_folders} 'pano_camera0' folder(s).")
 
 if __name__ == "__main__":
-    # If an argument is provided, try to interpret it as an output root
-    # Preferred: <output_root>/images
-    # Fallback: treat as project_root and use <project_root>/output/images
+    # If an argument is provided, treat it as the project root (the folder you dropped).
+    # We’ll delete <project_root>/output/images/**/pano_camera0
     if len(sys.argv) >= 2:
-        root = Path(sys.argv[1]).resolve()
-        if (root / "images").exists():
-            source = root / "images"
-        else:
-            source = root / "output" / "images"
+        project_root = Path(sys.argv[1]).resolve()
+        source = project_root / "output" / "images"
     else:
         # Fallback: current-dir/output/images (original behavior)
         source = Path("output/images").resolve()
