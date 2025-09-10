@@ -174,6 +174,7 @@ def render_perspective_images(
     )
 
     camera = pano_size = rays_in_cam = None
+    mask_mappings: list[tuple[str, str]] = []  # (image_name, absolute mask path)
     for pano_name in tqdm(pano_image_names):
         pano_path = pano_image_dir / pano_name
         try:
@@ -227,16 +228,26 @@ def render_perspective_images(
             )
 
             image_name = rig_config.cameras[cam_idx].image_prefix + pano_name
-            mask_name = f"{image_name}.png"
+            # Build mask name as <image_base>.mask.png, avoiding double extensions like .jpg.png
+            _img_rel = Path(image_name)
+            mask_rel = _img_rel.parent / f"{_img_rel.stem}.mask.png"
 
             image_path = output_image_dir / image_name
             image_path.parent.mkdir(exist_ok=True, parents=True)
             PIL.Image.fromarray(image).save(image_path, exif=gpsonly_exif)
 
-            mask_path = mask_dir / mask_name
+            mask_path = mask_dir / mask_rel
             mask_path.parent.mkdir(exist_ok=True, parents=True)
             if not pycolmap.Bitmap.from_array(mask).write(mask_path):
                 raise RuntimeError(f"Cannot write {mask_path}")
+            # Record mapping: image relative name (as used by COLMAP) -> mask absolute path
+            mask_mappings.append((image_name, str(mask_path.resolve())))
+
+    # Write mask list file for COLMAP to use arbitrary mask filenames
+    mask_list_path = mask_dir / "mask_list.txt"
+    with open(mask_list_path, "w", encoding="utf-8") as f:
+        for img_name, mpath in mask_mappings:
+            f.write(f"{img_name} {mpath}\n")
 
     return rig_config
 
@@ -286,10 +297,12 @@ def run(args):
     extraction_options.use_gpu = True
     extraction_options.gpu_index = "0"
 
+    # Use mask_list to support custom naming (e.g., <image>.mask.png)
+    reader_opts = {"mask_list_path": mask_dir / "mask_list.txt"}
     pycolmap.extract_features(
         database_path,
         image_dir,
-        reader_options={"mask_path": mask_dir},
+        reader_options=reader_opts,
         sift_options=extraction_options,
         camera_mode=pycolmap.CameraMode.PER_FOLDER,
     )
