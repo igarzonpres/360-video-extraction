@@ -53,10 +53,14 @@ def load_rotation_override_if_any(input_image_path: Path | None):
 def create_virtual_camera(
     pano_height: int, fov_deg: float = 90
 ) -> pycolmap.Camera:
-    """Create a virtual perspective camera."""
+    """Create a virtual perspective camera (SIMPLE_PINHOLE).
+
+    This pycolmap build expects a single focal parameter for SIMPLE_PINHOLE
+    and centers the principal point by default.
+    """
     image_size = int(pano_height * fov_deg / 180)
     focal = image_size / (2 * np.tan(np.deg2rad(fov_deg) / 2))
-    return pycolmap.Camera.create(0, "PINHOLE", focal, image_size, image_size)
+    return pycolmap.Camera.create(0, "SIMPLE_PINHOLE", float(focal), image_size, image_size)
 
 
 def get_virtual_camera_rays(camera: pycolmap.Camera) -> np.ndarray:
@@ -144,6 +148,10 @@ def create_pano_rig_config(
 
 
 
+def _wrap_angle_deg(a: float) -> float:
+    return ((a + 180.0) % 360.0) - 180.0
+
+
 def render_perspective_images(
     pano_image_names: Sequence[str],
     pano_image_dir: Path,
@@ -151,21 +159,91 @@ def render_perspective_images(
     mask_dir: Path,
     override_pairs: list[tuple[float, float]] | None = None,
     override_ref_idx: int | None = None,
+    export_xmp: bool = False,
 ) -> pycolmap.RigConfig:
     # Build camera rotations
     if override_pairs is not None:
         cams_from_pano_rotation = []
+        used_pairs: list[tuple[float, float]] = []
         for pitch_deg, yaw_deg in override_pairs:
             R = Rotation.from_euler("YX", [yaw_deg, pitch_deg], degrees=True).as_matrix()
             cams_from_pano_rotation.append(R)
+            used_pairs.append((float(pitch_deg), float(yaw_deg)))
         ref_idx = 0 if override_ref_idx is None else override_ref_idx
         logging.info(f"Loaded {len(cams_from_pano_rotation)} rotations from override (ref_idx={ref_idx}).")
     else:
-        cams_from_pano_rotation = get_virtual_rotations()
+        # Use built-in rotations and record their source angles
+        built_in_pairs = [
+            (0.0, 90.0),
+            (42.0, 0.0),
+            (-42.0, 0.0),
+            (0.0, 42.0),
+            (0.0, -42.0),
+            (42.0, 180.0),
+            (-42.0, 180.0),
+            (0.0, 222.0),
+            (0.0, 138.0),
+        ]
+        cams_from_pano_rotation = [
+            Rotation.from_euler("YX", [yaw_deg, pitch_deg], degrees=True).as_matrix()
+            for (pitch_deg, yaw_deg) in built_in_pairs
+        ]
+        used_pairs = built_in_pairs
         ref_idx = 0  # your current default
         logging.info(f"Using built-in get_virtual_rotations() (ref_idx={ref_idx}).")
 
     rig_config = create_pano_rig_config(cams_from_pano_rotation, ref_idx=ref_idx)
+
+    def write_xmp_sidecar(image_path: Path, pitch_deg: float, yaw_deg: float, camera: pycolmap.Camera):
+        """Write a minimal XMP sidecar with yaw/pitch/roll and intrinsics for RealityCapture.
+        - Uses GPano Pose* degrees as generic orientation hints
+        - Adds aux:FocalLength in pixels
+        """
+        # Derive pose directly from the known render angles
+        heading = _wrap_angle_deg(-float(yaw_deg))
+        pitch_out = float(pitch_deg)
+        roll_out = 0.0
+
+        # Robustly get focal in pixels from camera params across models
+        try:
+            params = np.array(camera.params, dtype=float)
+        except Exception:
+            params = None
+        if params is not None and params.size >= 2:
+            fx, fy = float(params[0]), float(params[1])
+            focal = float((fx + fy) / 2.0)
+        elif params is not None and params.size >= 1:
+            focal = float(params[0])
+        else:
+            # Fallback: try attribute if available, else set to 0
+            focal = float(getattr(camera, "focal_length", 0.0) or 0.0)
+
+        width = int(camera.width)
+        height = int(camera.height)
+
+        xmp = f"""<?xpacket begin='﻿' id='W5M0MpCehiHzreSzNTczkc9d'?>
+<x:xmpmeta xmlns:x='adobe:ns:meta/'>
+ <rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>
+  <rdf:Description xmlns:GPano='http://ns.google.com/photos/1.0/panorama/'>
+   <GPano:PoseHeadingDegrees>{heading:.6f}</GPano:PoseHeadingDegrees>
+   <GPano:PosePitchDegrees>{pitch_out:.6f}</GPano:PosePitchDegrees>
+   <GPano:PoseRollDegrees>{roll_out:.6f}</GPano:PoseRollDegrees>
+  </rdf:Description>
+  <rdf:Description xmlns:aux='http://ns.adobe.com/exif/1.0/aux/'>
+   <aux:FocalLength>{focal:.6f}</aux:FocalLength>
+  </rdf:Description>
+  <rdf:Description xmlns:tiff='http://ns.adobe.com/tiff/1.0/'>
+   <tiff:ImageWidth>{width}</tiff:ImageWidth>
+   <tiff:ImageLength>{height}</tiff:ImageLength>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end='w'?>
+"""
+        try:
+            image_path.with_suffix('.xmp').write_text(xmp, encoding='utf-8')
+        except Exception:
+            pass
 
 
     # We assign each pano pixel to the virtual camera with the closest center.
@@ -233,6 +311,10 @@ def render_perspective_images(
             image_path.parent.mkdir(exist_ok=True, parents=True)
             PIL.Image.fromarray(image).save(image_path, exif=gpsonly_exif)
 
+            if export_xmp:
+                pitch_deg, yaw_deg = used_pairs[cam_idx]
+                write_xmp_sidecar(image_path, float(pitch_deg), float(yaw_deg), camera)
+
             mask_path = mask_dir / mask_name
             mask_path.parent.mkdir(exist_ok=True, parents=True)
             if not pycolmap.Bitmap.from_array(mask).write(mask_path):
@@ -277,6 +359,7 @@ def run(args):
         mask_dir,
         override_pairs=override_pairs,
         override_ref_idx=override_ref_idx,
+        export_xmp=bool(getattr(args, 'export_rc_xmp', False)),
     )
 
     pycolmap.set_random_seed(0)
@@ -328,4 +411,5 @@ if __name__ == "__main__":
     parser.add_argument("--input_image_path", type=Path, required=True)
     parser.add_argument("--output_path", type=Path, required=True)
     parser.add_argument("--matcher", default="sequential", choices=["sequential", "exhaustive", "vocabtree", "spatial"])
+    parser.add_argument("--export_rc_xmp", action="store_true", help="Write XMP sidecars with yaw/pitch/roll and intrinsics")
     run(parser.parse_args())
