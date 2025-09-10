@@ -543,7 +543,7 @@ def pipeline_thread(project_root: Path, seconds_per_frame: float, masking_enable
         # Phase A: Extraction
         ui_main_progress(0, indeterminate=False)
         ui_status("Preparing extraction…")
-        video_count = extract_frames_with_progress(project_root, seconds_per_frame)
+        video_count = extract_frames_with_progress(project_root, seconds_per_frame, project_root / "frames")
         frames_root = project_root / "frames"
         # Determine output root from UI (default to <project_root>/output if empty)
         try:
