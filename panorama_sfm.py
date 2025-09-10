@@ -225,8 +225,6 @@ def render_perspective_images(
  <rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>
   <rdf:Description xmlns:xcr='http://www.capturingreality.com/ns/xcr/1.1#'
                    xcr:Version='2'
-                   xcr:PosePrior='locked'
-                   xcr:CalibrationPrior='locked'
                    xcr:DistortionModel='perspective'
                    xcr:DistortionCoeficients='0 0 0 0 0 0'
                    xcr:FocalLength35mm='{f35:.6f}'
@@ -238,13 +236,16 @@ def render_perspective_images(
                    xcr:InColoring='0'
                    xcr:InMeshing='1'>
    <xcr:Rotation>{rot_txt}</xcr:Rotation>
-   <xcr:Position>{pos_txt}</xcr:Position>
   </rdf:Description>
  </rdf:RDF>
 </x:xmpmeta>
 <?xpacket end='w'?>
 """
         image_path.with_suffix('.xmp').write_text(xmp, encoding='utf-8')
+        try:
+            logging.info(f"[XMP] wrote {image_path.with_suffix('.xmp')} (rotation prior only; pose/calibration not locked; no position)")
+        except Exception:
+            pass
 
     # We assign each pano pixel to the virtual camera with the closest center.
     cam_centers_in_pano = np.einsum(
