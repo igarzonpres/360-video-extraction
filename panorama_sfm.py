@@ -151,6 +151,7 @@ def render_perspective_images(
     mask_dir: Path,
     override_pairs: list[tuple[float, float]] | None = None,
     override_ref_idx: int | None = None,
+    export_xmp: bool = False,
 ) -> pycolmap.RigConfig:
     # Build camera rotations
     if override_pairs is not None:
@@ -166,6 +167,50 @@ def render_perspective_images(
         logging.info(f"Using built-in get_virtual_rotations() (ref_idx={ref_idx}).")
 
     rig_config = create_pano_rig_config(cams_from_pano_rotation, ref_idx=ref_idx)
+
+    def write_xmp_sidecar(image_path: Path, R_cam_from_pano: np.ndarray, camera: pycolmap.Camera):
+        """Write a minimal XMP sidecar with yaw/pitch/roll and intrinsics for RealityCapture.
+        - Uses GPano Pose* degrees as generic orientation hints
+        - Adds aux:FocalLength in pixels
+        """
+        try:
+            from scipy.spatial.transform import Rotation as SciRot
+        except Exception:
+            return  # no SciPy available; silently skip
+
+        # Recover yaw/pitch/roll in the same convention used to create rotations (YX order)
+        e = SciRot.from_matrix(R_cam_from_pano).as_euler("YXZ", degrees=True)
+        yaw_deg = float(e[0])
+        pitch_deg = float(e[1])
+        roll_deg = float(e[2])
+
+        focal = float(camera.focal_length)
+        width = int(camera.width)
+        height = int(camera.height)
+
+        xmp = f"""<?xpacket begin='﻿' id='W5M0MpCehiHzreSzNTczkc9d'?>
+<x:xmpmeta xmlns:x='adobe:ns:meta/'>
+ <rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>
+  <rdf:Description xmlns:GPano='http://ns.google.com/photos/1.0/panorama/'>
+   <GPano:PoseHeadingDegrees>{yaw_deg:.6f}</GPano:PoseHeadingDegrees>
+   <GPano:PosePitchDegrees>{pitch_deg:.6f}</GPano:PosePitchDegrees>
+   <GPano:PoseRollDegrees>{roll_deg:.6f}</GPano:PoseRollDegrees>
+  </rdf:Description>
+  <rdf:Description xmlns:aux='http://ns.adobe.com/exif/1.0/aux/'>
+   <aux:FocalLength>{focal:.6f}</aux:FocalLength>
+  </rdf:Description>
+  <rdf:Description xmlns:tiff='http://ns.adobe.com/tiff/1.0/'>
+   <tiff:ImageWidth>{width}</tiff:ImageWidth>
+   <tiff:ImageLength>{height}</tiff:ImageLength>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end='w'?>
+"""
+        try:
+            image_path.with_suffix('.xmp').write_text(xmp, encoding='utf-8')
+        except Exception:
+            pass
 
 
     # We assign each pano pixel to the virtual camera with the closest center.
@@ -233,6 +278,9 @@ def render_perspective_images(
             image_path.parent.mkdir(exist_ok=True, parents=True)
             PIL.Image.fromarray(image).save(image_path, exif=gpsonly_exif)
 
+            if export_xmp:
+                write_xmp_sidecar(image_path, cam_from_pano_r, camera)
+
             mask_path = mask_dir / mask_name
             mask_path.parent.mkdir(exist_ok=True, parents=True)
             if not pycolmap.Bitmap.from_array(mask).write(mask_path):
@@ -277,6 +325,7 @@ def run(args):
         mask_dir,
         override_pairs=override_pairs,
         override_ref_idx=override_ref_idx,
+        export_xmp=bool(getattr(args, 'export_rc_xmp', False)),
     )
 
     pycolmap.set_random_seed(0)
@@ -328,4 +377,5 @@ if __name__ == "__main__":
     parser.add_argument("--input_image_path", type=Path, required=True)
     parser.add_argument("--output_path", type=Path, required=True)
     parser.add_argument("--matcher", default="sequential", choices=["sequential", "exhaustive", "vocabtree", "spatial"])
+    parser.add_argument("--export_rc_xmp", action="store_true", help="Write XMP sidecars with yaw/pitch/roll and intrinsics")
     run(parser.parse_args())
