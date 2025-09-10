@@ -7,6 +7,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import cv2
+import re
+import shutil
 import numpy as np
 import PIL.ExifTags
 import PIL.Image
@@ -306,7 +308,17 @@ def render_perspective_images(
             )
 
             image_name = rig_config.cameras[cam_idx].image_prefix + pano_name
-            mask_name = f"{image_name}.png"
+            # Prefix file name with numeric subfolder (or folder name) to ensure uniqueness.
+            _img_rel = Path(image_name)
+            folder = _img_rel.parent.name
+            m = re.search(r"(\d+)$", folder)
+            folder_prefix = m.group(1) if m else folder
+            prefixed_name = f"{folder_prefix}_{_img_rel.name}"
+            image_name = str(_img_rel.parent / prefixed_name)
+
+            # Build mask name as <image_base>.mask.png, avoiding double extensions like .jpg.png
+            _img_rel = Path(image_name)
+            mask_rel = _img_rel.parent / f"{_img_rel.stem}.mask.png"
 
             image_path = output_image_dir / image_name
             image_path.parent.mkdir(exist_ok=True, parents=True)
@@ -319,10 +331,38 @@ def render_perspective_images(
                 R_cam_from_world = cam_from_pano_r.T
                 write_rc_xmp_sidecar(image_path, R_cam_from_world, camera)
 
-            mask_path = mask_dir / mask_name
+            # Write new-style mask (*.mask.png)
+            mask_path = mask_dir / mask_rel
             mask_path.parent.mkdir(exist_ok=True, parents=True)
             if not pycolmap.Bitmap.from_array(mask).write(mask_path):
                 raise RuntimeError(f"Cannot write {mask_path}")
+            # Also write legacy COLMAP mask naming into output/colmap_masks/<image_name>.png
+            legacy_mask_root = mask_dir.parent / "colmap_masks"
+            legacy_mask_path = legacy_mask_root / f"{image_name}.png"
+            legacy_mask_path.parent.mkdir(exist_ok=True, parents=True)
+            if not pycolmap.Bitmap.from_array(mask).write(legacy_mask_path):
+                raise RuntimeError(f"Cannot write {legacy_mask_path}")
+<<<<<<< HEAD
+            # Also write legacy COLMAP mask naming into output/colmap_masks/<image_name>.png
+            legacy_mask_root = mask_dir.parent / "colmap_masks"
+            legacy_mask_path = legacy_mask_root / f"{image_name}.png"
+            legacy_mask_path.parent.mkdir(exist_ok=True, parents=True)
+            if not pycolmap.Bitmap.from_array(mask).write(legacy_mask_path):
+                raise RuntimeError(f"Cannot write {legacy_mask_path}")
+
+            # Record mapping: image relative name (as used by COLMAP) -> mask absolute path (new-style only)
+            mask_mappings.append((image_name, str(mask_path.resolve())))
+
+    # Write mask list file for optional consumers (not used by our pycolmap build)
+    mask_list_path = mask_dir / "mask_list.txt"
+    try:
+        with open(mask_list_path, "w", encoding="utf-8") as f:
+            for img_name, mpath in mask_mappings:
+                f.write(f"{img_name} {mpath}\n")
+    except Exception:
+        pass
+=======
+>>>>>>> origin/main
 
     return rig_config
 
@@ -366,6 +406,26 @@ def run(args):
         export_xmp=bool(getattr(args, 'export_rc_xmp', False)),
     )
 
+    # --- Flatten images and masks for RealityCapture ---
+    try:
+        rc_dir = args.output_path / "RC"
+        rc_dir.mkdir(exist_ok=True, parents=True)
+        img_count = 0
+        mask_count = 0
+        # Copy images (flat)
+        for p in image_dir.rglob("*"):
+            if p.is_file():
+                shutil.copy2(p, rc_dir / p.name)
+                img_count += 1
+        # Copy masks (flat)
+        for p in mask_dir.rglob("*"):
+            if p.is_file():
+                shutil.copy2(p, rc_dir / p.name)
+                mask_count += 1
+        logging.info(f"RC export: copied {img_count} images and {mask_count} masks into {rc_dir}")
+    except Exception as e:
+        logging.warning(f"RC export step failed: {e}")
+
     pycolmap.set_random_seed(0)
 
 
@@ -373,10 +433,18 @@ def run(args):
     extraction_options.use_gpu = True
     extraction_options.gpu_index = "0"
 
+<<<<<<< HEAD
+    # Use legacy mask_path pointing to output/colmap_masks for compatibility
+    pycolmap.extract_features(
+        database_path,
+        image_dir,
+        reader_options={"mask_path": args.output_path / "colmap_masks"},
+=======
     pycolmap.extract_features(
         database_path,
         image_dir,
         reader_options={"mask_path": mask_dir},
+>>>>>>> origin/main
         sift_options=extraction_options,
         camera_mode=pycolmap.CameraMode.PER_FOLDER,
     )
