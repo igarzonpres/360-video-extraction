@@ -1,12 +1,11 @@
 import os
-import sys
 import shutil
 from pathlib import Path
 from collections import defaultdict
 
 # === CONFIGURATION ===
-DEFAULT_SOURCE_DIR = Path("output/images")      # Default where COLMAP's images are
-DEFAULT_DEST_DIR = Path("output/Segment_images")       # Default where segmented groups go
+SOURCE_DIR = Path("output/images")      # Where COLMAP's images are
+DEST_DIR = Path("output/Segment_images")       # Where segmented groups go
 VALID_EXTENSIONS = {".jpg", ".jpeg", ".png"}  # Add/remove if needed
 
 def get_prefix(filename):
@@ -54,15 +53,6 @@ def delete_all_pano_camera0(source_dir):
         print(f"🗑️  Deleted {deleted_folders} 'pano_camera0' folders.")
 
 if __name__ == "__main__":
-    # Optional first argument: output_root (expects images under <output_root>/images)
-    if len(sys.argv) >= 2:
-        output_root = Path(sys.argv[1]).resolve()
-        src = output_root / "images"
-        dst = output_root / "Segment_images"
-    else:
-        src = DEFAULT_SOURCE_DIR
-        dst = DEFAULT_DEST_DIR
-
-    segments = collect_segment_images(src)
-    copy_segments(segments, dst)
-    delete_all_pano_camera0(src)
+    segments = collect_segment_images(SOURCE_DIR)
+    copy_segments(segments, DEST_DIR)
+    delete_all_pano_camera0(SOURCE_DIR)
