@@ -11,6 +11,7 @@ def main():
                    help="Override path to frames dir (defaults to <base_dir>/frames)")
     p.add_argument("--output_path", type=Path, default=None,
                    help="Override path to output dir (defaults to <base_dir>/output)")
+    p.add_argument("--export_rc_xmp", action="store_true", help="Write XMP sidecars for RealityCapture")
     args = p.parse_args()
 
     base_dir = Path(args.base_dir).resolve()
@@ -23,6 +24,8 @@ def main():
         "--input_image_path", str(input_dir),
         "--output_path", str(output_dir),
     ]
+    if args.export_rc_xmp:
+        cmd.append("--export_rc_xmp")
     subprocess.run(cmd, check=True)
 
 if __name__ == "__main__":

@@ -330,7 +330,13 @@ def run_panorama_sfm(project_root: Path) -> bool:
         ui_log(f"[ERROR] Missing run_panorama_sfm.py next to the GUI: {wrapper}")
         return False
 
+    # Build wrapper command and pass optional XMP export
     cmd = [sys.executable, str(wrapper), str(project_root)]
+    try:
+        if export_rc_xmp.get():
+            cmd.append("--export_rc_xmp")
+    except Exception:
+        pass
     ui_log(f"[RUN] {' '.join(cmd)}")
     ui_status("Running COLMAP pipeline…")
 
@@ -521,6 +527,7 @@ def on_masking_toggle():
 def main():
     global _root, status_var, progress_main, progress_sub, log_text
     global use_masking, frame_interval, drop_zone, run_btn, browse_btn
+    global export_rc_xmp
     global yolo_model_path, yolo_conf, yolo_dilate_px, yolo_invert_mask, yolo_apply_to_rgb, _yolo_widgets
 
     _root = TkinterDnD.Tk()
@@ -571,6 +578,18 @@ def main():
         selectcolor="black",
     )
     mcb.pack(side="left")
+
+    # XMP export toggle
+    export_rc_xmp = BooleanVar(value=False)
+    xmp_cb = Checkbutton(
+        ctrl,
+        text="Export XMP for RealityCapture",
+        variable=export_rc_xmp,
+        onvalue=True, offvalue=False,
+        bg="black", fg="white", activebackground="black",
+        selectcolor="black",
+    )
+    xmp_cb.pack(side="left", padx=(12,0))
 
     # ---------- Drop zone ----------
     drop_zone = Label(
