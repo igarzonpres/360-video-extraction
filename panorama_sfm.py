@@ -342,14 +342,6 @@ def render_perspective_images(
             legacy_mask_path.parent.mkdir(exist_ok=True, parents=True)
             if not pycolmap.Bitmap.from_array(mask).write(legacy_mask_path):
                 raise RuntimeError(f"Cannot write {legacy_mask_path}")
-<<<<<<< HEAD
-            # Also write legacy COLMAP mask naming into output/colmap_masks/<image_name>.png
-            legacy_mask_root = mask_dir.parent / "colmap_masks"
-            legacy_mask_path = legacy_mask_root / f"{image_name}.png"
-            legacy_mask_path.parent.mkdir(exist_ok=True, parents=True)
-            if not pycolmap.Bitmap.from_array(mask).write(legacy_mask_path):
-                raise RuntimeError(f"Cannot write {legacy_mask_path}")
-
             # Record mapping: image relative name (as used by COLMAP) -> mask absolute path (new-style only)
             mask_mappings.append((image_name, str(mask_path.resolve())))
 
