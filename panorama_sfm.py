@@ -194,57 +194,57 @@ def render_perspective_images(
 
     rig_config = create_pano_rig_config(cams_from_pano_rotation, ref_idx=ref_idx)
 
-    def write_xmp_sidecar(image_path: Path, pitch_deg: float, yaw_deg: float, camera: pycolmap.Camera):
-        """Write a minimal XMP sidecar with yaw/pitch/roll and intrinsics for RealityCapture.
-        - Uses GPano Pose* degrees as generic orientation hints
-        - Adds aux:FocalLength in pixels
+    def write_rc_xmp_sidecar(image_path: Path, R_cam_from_world: np.ndarray, camera: pycolmap.Camera):
         """
-        # Derive pose directly from the known render angles
-        heading = _wrap_angle_deg(-float(yaw_deg))
-        pitch_out = float(pitch_deg)
-        roll_out = 0.0
-
-        # Robustly get focal in pixels from camera params across models
+        Write an XMP sidecar in Capturing Reality 'xcr' schema.
+        - Rotation: 3x3 row-major world->camera
+        - Position: camera center in 'Same as XMP' coords (set to 0 0 0 here)
+        - Intrinsics: FocalLength35mm, principal point at center, no distortion
+        """
+        # Intrinsics
         try:
             params = np.array(camera.params, dtype=float)
         except Exception:
             params = None
-        if params is not None and params.size >= 2:
-            fx, fy = float(params[0]), float(params[1])
-            focal = float((fx + fy) / 2.0)
-        elif params is not None and params.size >= 1:
-            focal = float(params[0])
+        if params is not None and params.size >= 1:
+            f_px = float(params[0])
         else:
-            # Fallback: try attribute if available, else set to 0
-            focal = float(getattr(camera, "focal_length", 0.0) or 0.0)
-
+            f_px = float(getattr(camera, "focal_length", 0.0) or 0.0)
         width = int(camera.width)
         height = int(camera.height)
+        # 35mm-equivalent focal length (horizontal) from pixel focal and width
+        f35 = 36.0 * f_px / float(width) if width > 0 else 0.0
+
+        # Flatten rotation row-major
+        r = R_cam_from_world.astype(float).reshape(3, 3)
+        rot_txt = " ".join(f"{v:.15g}" for v in r.flatten(order="C"))
+        pos_txt = "0 0 0"
 
         xmp = f"""<?xpacket begin='﻿' id='W5M0MpCehiHzreSzNTczkc9d'?>
 <x:xmpmeta xmlns:x='adobe:ns:meta/'>
  <rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>
-  <rdf:Description xmlns:GPano='http://ns.google.com/photos/1.0/panorama/'>
-   <GPano:PoseHeadingDegrees>{heading:.6f}</GPano:PoseHeadingDegrees>
-   <GPano:PosePitchDegrees>{pitch_out:.6f}</GPano:PosePitchDegrees>
-   <GPano:PoseRollDegrees>{roll_out:.6f}</GPano:PoseRollDegrees>
-  </rdf:Description>
-  <rdf:Description xmlns:aux='http://ns.adobe.com/exif/1.0/aux/'>
-   <aux:FocalLength>{focal:.6f}</aux:FocalLength>
-  </rdf:Description>
-  <rdf:Description xmlns:tiff='http://ns.adobe.com/tiff/1.0/'>
-   <tiff:ImageWidth>{width}</tiff:ImageWidth>
-   <tiff:ImageLength>{height}</tiff:ImageLength>
+  <rdf:Description xmlns:xcr='http://www.capturingreality.com/ns/xcr/1.1#'
+                   xcr:Version='2'
+                   xcr:PosePrior='locked'
+                   xcr:CalibrationPrior='locked'
+                   xcr:DistortionModel='perspective'
+                   xcr:DistortionCoeficients='0 0 0 0 0 0'
+                   xcr:FocalLength35mm='{f35:.6f}'
+                   xcr:Skew='0'
+                   xcr:AspectRatio='1'
+                   xcr:PrincipalPointU='0'
+                   xcr:PrincipalPointV='0'
+                   xcr:InTexturing='1'
+                   xcr:InColoring='0'
+                   xcr:InMeshing='1'>
+   <xcr:Rotation>{rot_txt}</xcr:Rotation>
+   <xcr:Position>{pos_txt}</xcr:Position>
   </rdf:Description>
  </rdf:RDF>
 </x:xmpmeta>
 <?xpacket end='w'?>
 """
-        try:
-            image_path.with_suffix('.xmp').write_text(xmp, encoding='utf-8')
-        except Exception:
-            pass
-
+        image_path.with_suffix('.xmp').write_text(xmp, encoding='utf-8')
 
     # We assign each pano pixel to the virtual camera with the closest center.
     cam_centers_in_pano = np.einsum(
@@ -252,7 +252,6 @@ def render_perspective_images(
     )
 
     camera = pano_size = rays_in_cam = None
-    mask_mappings: list[tuple[str, str]] = []  # (image_name, absolute mask path)
     for pano_name in tqdm(pano_image_names):
         pano_path = pano_image_dir / pano_name
         try:
@@ -306,29 +305,23 @@ def render_perspective_images(
             )
 
             image_name = rig_config.cameras[cam_idx].image_prefix + pano_name
-            # Build mask name as <image_base>.mask.png, avoiding double extensions like .jpg.png
-            _img_rel = Path(image_name)
-            mask_rel = _img_rel.parent / f"{_img_rel.stem}.mask.png"
+            mask_name = f"{image_name}.png"
 
             image_path = output_image_dir / image_name
             image_path.parent.mkdir(exist_ok=True, parents=True)
             PIL.Image.fromarray(image).save(image_path, exif=gpsonly_exif)
-            if export_xmp:
-                pitch_deg, yaw_deg = used_pairs[cam_idx]
-                write_xmp_sidecar(image_path, float(pitch_deg), float(yaw_deg), camera)
 
-            mask_path = mask_dir / mask_rel
+            if export_xmp:
+                # RealityCapture expects world->camera rotation.
+                # Our matrix cam_from_pano_r maps camera->world for the row-vector usage above,
+                # so we transpose it for XMP.
+                R_cam_from_world = cam_from_pano_r.T
+                write_rc_xmp_sidecar(image_path, R_cam_from_world, camera)
+
+            mask_path = mask_dir / mask_name
             mask_path.parent.mkdir(exist_ok=True, parents=True)
             if not pycolmap.Bitmap.from_array(mask).write(mask_path):
                 raise RuntimeError(f"Cannot write {mask_path}")
-            # Record mapping: image relative name (as used by COLMAP) -> mask absolute path
-            mask_mappings.append((image_name, str(mask_path.resolve())))
-
-    # Write mask list file for COLMAP to use arbitrary mask filenames
-    mask_list_path = mask_dir / "mask_list.txt"
-    with open(mask_list_path, "w", encoding="utf-8") as f:
-        for img_name, mpath in mask_mappings:
-            f.write(f"{img_name} {mpath}\n")
 
     return rig_config
 
@@ -379,12 +372,10 @@ def run(args):
     extraction_options.use_gpu = True
     extraction_options.gpu_index = "0"
 
-    # Use mask_list to support custom naming (e.g., <image>.mask.png)
-    reader_opts = {"mask_list_path": mask_dir / "mask_list.txt"}
     pycolmap.extract_features(
         database_path,
         image_dir,
-        reader_options=reader_opts,
+        reader_options={"mask_path": mask_dir},
         sift_options=extraction_options,
         camera_mode=pycolmap.CameraMode.PER_FOLDER,
     )
@@ -423,5 +414,5 @@ if __name__ == "__main__":
     parser.add_argument("--input_image_path", type=Path, required=True)
     parser.add_argument("--output_path", type=Path, required=True)
     parser.add_argument("--matcher", default="sequential", choices=["sequential", "exhaustive", "vocabtree", "spatial"])
-    parser.add_argument("--export_rc_xmp", action="store_true", help="Write XMP sidecars with yaw/pitch/roll and intrinsics")
+    parser.add_argument("--export_rc_xmp", action="store_true", help="Write XMP sidecars for RealityCapture (xcr schema)")
     run(parser.parse_args())
