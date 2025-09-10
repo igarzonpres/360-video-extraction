@@ -8,6 +8,7 @@ from pathlib import Path
 
 import cv2
 import re
+import shutil
 import numpy as np
 import PIL.ExifTags
 import PIL.Image
@@ -380,6 +381,26 @@ def run(args):
         override_ref_idx=override_ref_idx,
         export_xmp=bool(getattr(args, 'export_rc_xmp', False)),
     )
+
+    # --- Flatten images and masks for RealityCapture ---
+    try:
+        rc_dir = args.output_path / "RC"
+        rc_dir.mkdir(exist_ok=True, parents=True)
+        img_count = 0
+        mask_count = 0
+        # Copy images (flat)
+        for p in image_dir.rglob("*"):
+            if p.is_file():
+                shutil.copy2(p, rc_dir / p.name)
+                img_count += 1
+        # Copy masks (flat)
+        for p in mask_dir.rglob("*"):
+            if p.is_file():
+                shutil.copy2(p, rc_dir / p.name)
+                mask_count += 1
+        logging.info(f"RC export: copied {img_count} images and {mask_count} masks into {rc_dir}")
+    except Exception as e:
+        logging.warning(f"RC export step failed: {e}")
 
     pycolmap.set_random_seed(0)
 
