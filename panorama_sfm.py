@@ -331,14 +331,24 @@ def render_perspective_images(
             mask_path.parent.mkdir(exist_ok=True, parents=True)
             if not pycolmap.Bitmap.from_array(mask).write(mask_path):
                 raise RuntimeError(f"Cannot write {mask_path}")
-            # Record mapping: image relative name (as used by COLMAP) -> mask absolute path
+            # Also write legacy COLMAP mask naming into output/colmap_masks/<image_name>.png
+            legacy_mask_root = mask_dir.parent / "colmap_masks"
+            legacy_mask_path = legacy_mask_root / f"{image_name}.png"
+            legacy_mask_path.parent.mkdir(exist_ok=True, parents=True)
+            if not pycolmap.Bitmap.from_array(mask).write(legacy_mask_path):
+                raise RuntimeError(f"Cannot write {legacy_mask_path}")
+
+            # Record mapping: image relative name (as used by COLMAP) -> mask absolute path (new-style only)
             mask_mappings.append((image_name, str(mask_path.resolve())))
 
-    # Write mask list file for COLMAP to use arbitrary mask filenames
+    # Write mask list file for optional consumers (not used by our pycolmap build)
     mask_list_path = mask_dir / "mask_list.txt"
-    with open(mask_list_path, "w", encoding="utf-8") as f:
-        for img_name, mpath in mask_mappings:
-            f.write(f"{img_name} {mpath}\n")
+    try:
+        with open(mask_list_path, "w", encoding="utf-8") as f:
+            for img_name, mpath in mask_mappings:
+                f.write(f"{img_name} {mpath}\n")
+    except Exception:
+        pass
 
     return rig_config
 
@@ -409,12 +419,11 @@ def run(args):
     extraction_options.use_gpu = True
     extraction_options.gpu_index = "0"
 
-    # Use mask_list to support custom naming (e.g., <image>.mask.png)
-    reader_opts = {"mask_list_path": mask_dir / "mask_list.txt"}
+    # Use legacy mask_path pointing to output/colmap_masks for compatibility
     pycolmap.extract_features(
         database_path,
         image_dir,
-        reader_options=reader_opts,
+        reader_options={"mask_path": args.output_path / "colmap_masks"},
         sift_options=extraction_options,
         camera_mode=pycolmap.CameraMode.PER_FOLDER,
     )
