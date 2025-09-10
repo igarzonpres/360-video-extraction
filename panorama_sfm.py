@@ -53,13 +53,14 @@ def load_rotation_override_if_any(input_image_path: Path | None):
 def create_virtual_camera(
     pano_height: int, fov_deg: float = 90
 ) -> pycolmap.Camera:
-    """Create a virtual perspective camera (SIMPLE_PINHOLE)."""
+    """Create a virtual perspective camera (SIMPLE_PINHOLE).
+
+    This pycolmap build expects a single focal parameter for SIMPLE_PINHOLE
+    and centers the principal point by default.
+    """
     image_size = int(pano_height * fov_deg / 180)
     focal = image_size / (2 * np.tan(np.deg2rad(fov_deg) / 2))
-    cx = image_size / 2.0
-    cy = image_size / 2.0
-    params = [float(focal), float(cx), float(cy)]
-    return pycolmap.Camera.create(0, "SIMPLE_PINHOLE", params, image_size, image_size)
+    return pycolmap.Camera.create(0, "SIMPLE_PINHOLE", float(focal), image_size, image_size)
 
 
 def get_virtual_camera_rays(camera: pycolmap.Camera) -> np.ndarray:
