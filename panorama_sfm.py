@@ -184,7 +184,20 @@ def render_perspective_images(
         pitch_deg = float(e[1])
         roll_deg = float(e[2])
 
-        focal = float(camera.focal_length)
+        # Robustly get focal in pixels from camera params across models
+        try:
+            params = np.array(camera.params, dtype=float)
+        except Exception:
+            params = None
+        if params is not None and params.size >= 2:
+            fx, fy = float(params[0]), float(params[1])
+            focal = float((fx + fy) / 2.0)
+        elif params is not None and params.size >= 1:
+            focal = float(params[0])
+        else:
+            # Fallback: try attribute if available, else set to 0
+            focal = float(getattr(camera, "focal_length", 0.0) or 0.0)
+
         width = int(camera.width)
         height = int(camera.height)
 
