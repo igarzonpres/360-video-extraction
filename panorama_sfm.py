@@ -255,6 +255,8 @@ def render_perspective_images(
     )
 
     camera = pano_size = rays_in_cam = None
+    # Collect mapping of image relative names to new-style mask absolute paths (optional consumers)
+    mask_mappings = []
     for pano_name in tqdm(pano_image_names):
         pano_path = pano_image_dir / pano_name
         try:
