@@ -204,12 +204,12 @@ def extract_frames_with_progress(video_dir: Path, interval_seconds: float) -> in
 
 def run_yolo_masking(frames_root: Path) -> int:
     """
-    EXACT YOLO settings as mask_yolo.py, but overwrites the original JPGs in frames/:
-      - model: yolov8x-seg.pt
-      - conf: 0.35, iou: 0.45, imgsz: 1024
-      - classes: [0] (person)
-      - remove_person=True, grow_person_px=30
-    Output: in-place .jpg overwrite in frames/
+    Generate YOLO person masks without modifying original frames:
+      - model: yolov8x-seg.pt, conf: 0.35, iou: 0.45, imgsz: 1024, classes: [0]
+      - Input:  frames_root/*.jpg
+      - Output: frames_root.parent/masks_YOLO/<image>.mask.png
+        Person = black (0), background = white (255)
+    Returns number of masks written.
     """
     try:
         from ultralytics import YOLO
@@ -321,6 +321,114 @@ def run_yolo_masking(frames_root: Path) -> int:
 
 
 # =========================
+# Override: YOLO masks to separate folder
+# =========================
+
+def run_yolo_masking(frames_root: Path) -> int:  # type: ignore[override]
+    """
+    Generate YOLO person masks without modifying original frames:
+      - model: yolov8x-seg.pt, conf: 0.35, iou: 0.45, imgsz: 1024, classes: [0]
+      - Input:  frames_root/*.jpg
+      - Output: frames_root.parent/masks_YOLO/<image>.mask.png
+        Person = black (0), background = white (255)
+    Returns number of masks written.
+    """
+    try:
+        from ultralytics import YOLO
+        import numpy as np
+        import cv2
+        import torch
+        import time
+    except Exception:
+        ui_log("[ERROR] YOLO/torch/OpenCV not available.")
+        ui_log("       pip install ultralytics opencv-python torch torchvision torchaudio")
+        return 0
+
+    # --- Fixed parameters ---
+    model_name = "yolov8x-seg.pt"
+    conf = 0.35
+    iou = 0.45
+    imgsz = 1024
+    classes = [0]           # person
+    grow_person_px = 30
+
+    def load_bgr(path: Path) -> np.ndarray:
+        img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if img is None:
+            raise RuntimeError(f"Failed to read image: {path}")
+        return img
+
+    def morph_expand(mask_bool: np.ndarray, grow_px: int) -> np.ndarray:
+        if grow_px == 0:
+            return mask_bool
+        mask = (mask_bool.astype(np.uint8) * 255)
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        step = 3
+        iters = max(1, int(abs(grow_px) / step))
+        out = cv2.dilate(mask, k, iterations=iters) if grow_px > 0 else cv2.erode(mask, k, iterations=iters)
+        return (out > 0)
+
+    img_paths = sorted(frames_root.glob("*.jpg"))
+    if not img_paths:
+        ui_log(f"[WARN] No .jpg frames found in {frames_root}")
+        return 0
+
+    masks_dir = frames_root.parent / "masks_YOLO"
+    masks_dir.mkdir(parents=True, exist_ok=True)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    ui_log(f"[YOLO] Loading {model_name} on {device} …")
+    model = YOLO(model_name)
+
+    total = len(img_paths)
+    processed = 0
+    ui_status("Generating YOLO masks…")
+    ui_sub_progress(0, indeterminate=False)
+
+    last_update = time.time()
+
+    for i, img_path in enumerate(img_paths, 1):
+        try:
+            bgr = load_bgr(img_path)
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            h, w = rgb.shape[:2]
+
+            results = model.predict(
+                source=rgb,
+                conf=conf,
+                iou=iou,
+                imgsz=imgsz,
+                verbose=False,
+                classes=classes,
+                device=None
+            )
+
+            person_bool = np.zeros((h, w), dtype=bool)  # default no person
+            if results and results[0].masks is not None and len(results[0].masks) > 0:
+                masks_tensor = results[0].masks.data.cpu().numpy()
+                person_small = (masks_tensor.max(axis=0) > 0.5).astype(np.uint8)
+                person = cv2.resize(person_small, (w, h), interpolation=cv2.INTER_NEAREST).astype(bool)
+                person = morph_expand(person, grow_person_px)
+                person_bool = person
+
+            # Person black (0), background white (255)
+            mask_u8 = np.where(person_bool, 0, 255).astype(np.uint8)
+            out_name = f"{Path(img_path).stem}.mask.png"
+            out_path = masks_dir / out_name
+            cv2.imwrite(str(out_path), mask_u8)
+
+            processed += 1
+
+        except Exception as e:
+            ui_log(f"[ERROR] {img_path.name}: {e}")
+
+        if (time.time() - last_update) > 0.05:
+            ui_sub_progress(min(100.0, 100.0 * i / total), indeterminate=False)
+            last_update = time.time()
+
+    ui_sub_progress(100.0, indeterminate=False)
+    ui_log(f"[OK] Wrote {processed}/{total} masks to {masks_dir}")
+    return processed
 # External steps (threaded helpers)
 # =========================
 
