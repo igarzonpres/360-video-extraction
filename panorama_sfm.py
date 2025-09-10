@@ -148,6 +148,10 @@ def create_pano_rig_config(
 
 
 
+def _wrap_angle_deg(a: float) -> float:
+    return ((a + 180.0) % 360.0) - 180.0
+
+
 def render_perspective_images(
     pano_image_names: Sequence[str],
     pano_image_dir: Path,
@@ -160,33 +164,45 @@ def render_perspective_images(
     # Build camera rotations
     if override_pairs is not None:
         cams_from_pano_rotation = []
+        used_pairs: list[tuple[float, float]] = []
         for pitch_deg, yaw_deg in override_pairs:
             R = Rotation.from_euler("YX", [yaw_deg, pitch_deg], degrees=True).as_matrix()
             cams_from_pano_rotation.append(R)
+            used_pairs.append((float(pitch_deg), float(yaw_deg)))
         ref_idx = 0 if override_ref_idx is None else override_ref_idx
         logging.info(f"Loaded {len(cams_from_pano_rotation)} rotations from override (ref_idx={ref_idx}).")
     else:
-        cams_from_pano_rotation = get_virtual_rotations()
+        # Use built-in rotations and record their source angles
+        built_in_pairs = [
+            (0.0, 90.0),
+            (42.0, 0.0),
+            (-42.0, 0.0),
+            (0.0, 42.0),
+            (0.0, -42.0),
+            (42.0, 180.0),
+            (-42.0, 180.0),
+            (0.0, 222.0),
+            (0.0, 138.0),
+        ]
+        cams_from_pano_rotation = [
+            Rotation.from_euler("YX", [yaw_deg, pitch_deg], degrees=True).as_matrix()
+            for (pitch_deg, yaw_deg) in built_in_pairs
+        ]
+        used_pairs = built_in_pairs
         ref_idx = 0  # your current default
         logging.info(f"Using built-in get_virtual_rotations() (ref_idx={ref_idx}).")
 
     rig_config = create_pano_rig_config(cams_from_pano_rotation, ref_idx=ref_idx)
 
-    def write_xmp_sidecar(image_path: Path, R_cam_from_pano: np.ndarray, camera: pycolmap.Camera):
+    def write_xmp_sidecar(image_path: Path, pitch_deg: float, yaw_deg: float, camera: pycolmap.Camera):
         """Write a minimal XMP sidecar with yaw/pitch/roll and intrinsics for RealityCapture.
         - Uses GPano Pose* degrees as generic orientation hints
         - Adds aux:FocalLength in pixels
         """
-        try:
-            from scipy.spatial.transform import Rotation as SciRot
-        except Exception:
-            return  # no SciPy available; silently skip
-
-        # Recover yaw/pitch/roll in the same convention used to create rotations (YX order)
-        e = SciRot.from_matrix(R_cam_from_pano).as_euler("YXZ", degrees=True)
-        yaw_deg = float(e[0])
-        pitch_deg = float(e[1])
-        roll_deg = float(e[2])
+        # Derive pose directly from the known render angles
+        heading = _wrap_angle_deg(-float(yaw_deg))
+        pitch_out = float(pitch_deg)
+        roll_out = 0.0
 
         # Robustly get focal in pixels from camera params across models
         try:
@@ -209,9 +225,9 @@ def render_perspective_images(
 <x:xmpmeta xmlns:x='adobe:ns:meta/'>
  <rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>
   <rdf:Description xmlns:GPano='http://ns.google.com/photos/1.0/panorama/'>
-   <GPano:PoseHeadingDegrees>{yaw_deg:.6f}</GPano:PoseHeadingDegrees>
-   <GPano:PosePitchDegrees>{pitch_deg:.6f}</GPano:PosePitchDegrees>
-   <GPano:PoseRollDegrees>{roll_deg:.6f}</GPano:PoseRollDegrees>
+   <GPano:PoseHeadingDegrees>{heading:.6f}</GPano:PoseHeadingDegrees>
+   <GPano:PosePitchDegrees>{pitch_out:.6f}</GPano:PosePitchDegrees>
+   <GPano:PoseRollDegrees>{roll_out:.6f}</GPano:PoseRollDegrees>
   </rdf:Description>
   <rdf:Description xmlns:aux='http://ns.adobe.com/exif/1.0/aux/'>
    <aux:FocalLength>{focal:.6f}</aux:FocalLength>
@@ -296,7 +312,8 @@ def render_perspective_images(
             PIL.Image.fromarray(image).save(image_path, exif=gpsonly_exif)
 
             if export_xmp:
-                write_xmp_sidecar(image_path, cam_from_pano_r, camera)
+                pitch_deg, yaw_deg = used_pairs[cam_idx]
+                write_xmp_sidecar(image_path, float(pitch_deg), float(yaw_deg), camera)
 
             mask_path = mask_dir / mask_name
             mask_path.parent.mkdir(exist_ok=True, parents=True)
