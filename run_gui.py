@@ -137,15 +137,13 @@ def ui_disable_inputs(disabled=True):
 # Frame extraction with progress
 # =========================
 
-def extract_frames_with_progress(video_dir: Path, interval_seconds: float) -> int:
+def extract_frames_with_progress(video_dir: Path, interval_seconds: float, output_base_dir: Path) -> int:
     """
-    Extract frames from all videos directly inside video_dir into:
-        video_dir/frames/
+    Extract frames from all videos directly inside video_dir into output_base_dir:
     (All frames in ONE folder; filenames are prefixed by video name.)
 
     Returns: number of videos processed.
     """
-    output_base_dir = video_dir / "frames"
     output_base_dir.mkdir(parents=True, exist_ok=True)
 
     vids = list_videos(video_dir)
@@ -439,8 +437,15 @@ def run_panorama_sfm(project_root: Path, output_root: Path) -> bool:
         ui_log(f"[ERROR] Missing run_panorama_sfm.py next to the GUI: {wrapper}")
         return False
 
-    # Build wrapper command and pass optional XMP export
-    cmd = [sys.executable, str(wrapper), str(project_root), "--output_path", str(output_root)]
+    # Build wrapper command and pass input/output paths + optional XMP export
+    frames_root = output_root / "frames"
+    cmd = [
+        sys.executable,
+        str(wrapper),
+        str(project_root),
+        "--input_image_path", str(frames_root),
+        "--output_path", str(output_root),
+    ]
     try:
         if export_rc_xmp.get():
             cmd.append("--export_rc_xmp")
@@ -547,12 +552,24 @@ def pipeline_thread(project_root: Path, seconds_per_frame: float, masking_enable
         except Exception:
             output_root = project_root / "output"
         output_root.mkdir(parents=True, exist_ok=True)
+        # Move frames under output root if they were extracted to project root
+        try:
+            frames_src = project_root / "frames"
+            frames_dst = output_root / "frames"
+            if frames_src.exists() and frames_src.resolve() != frames_dst.resolve():
+                frames_dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(frames_src), str(frames_dst))
+                ui_log(f"[MOVE] Relocated frames to {frames_dst}")
+            frames_root = frames_dst if frames_dst.exists() else frames_src
+        except Exception as e:
+            frames_root = project_root / "frames"
+            ui_log(f"[WARN] Could not relocate frames: {e}")
 
         # Phase B: Angles & optional masking (no UI variables)
         if masking_enabled:
             ui_status("Writing rotation override (masking)…")
-            write_rotation_override(project_root, MASKING_PITCH_YAW_PAIRS, MASKING_REF_IDX)
-            ui_log(f"[OK] Wrote rotation_override.json (masking) in {project_root}")
+            write_rotation_override(output_root, MASKING_PITCH_YAW_PAIRS, MASKING_REF_IDX)
+            ui_log(f"[OK] Wrote rotation_override.json (masking) in {output_root}")
 
             ui_status("Masking frames (fixed YOLO settings)…")
             processed = run_yolo_masking(frames_root=frames_root)
@@ -560,8 +577,8 @@ def pipeline_thread(project_root: Path, seconds_per_frame: float, masking_enable
                 ui_log("[WARN] No frames were masked (or masking skipped due to error). Continuing…")
         else:
             ui_status("Writing rotation override (no masking)…")
-            write_rotation_override(project_root, NO_MASKING_PITCH_YAW_PAIRS, NO_MASKING_REF_IDX)
-            ui_log(f"[OK] Wrote rotation_override.json (no masking) in {project_root}")
+            write_rotation_override(output_root, NO_MASKING_PITCH_YAW_PAIRS, NO_MASKING_REF_IDX)
+            ui_log(f"[OK] Wrote rotation_override.json (no masking) in {output_root}")
 
         ui_main_progress(33, indeterminate=False)
 
