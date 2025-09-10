@@ -51,10 +51,16 @@ NO_MASKING_REF_IDX = 0
 
 VALID_VIDEO_EXT = {".mp4", ".mov", ".avi", ".mkv"}
 
+_yaw_override_pairs: list[tuple[float, float]] | None = None
+
 def write_rotation_override(root_dir: Path, pairs, ref_idx: int) -> Path:
-    payload = {"pitch_yaw_pairs": pairs, "ref_idx": ref_idx}
+    global _yaw_override_pairs
+    use_pairs = _yaw_override_pairs if _yaw_override_pairs is not None else pairs
+    payload = {"pitch_yaw_pairs": use_pairs, "ref_idx": ref_idx}
     out_path = root_dir / "rotation_override.json"
     out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    # reset after use so subsequent calls behave normally
+    _yaw_override_pairs = None
     return out_path
 
 def open_in_explorer(path: Path) -> None:
@@ -197,6 +203,81 @@ def extract_frames_with_progress(video_dir: Path, interval_seconds: float) -> in
         ui_main_progress(min(100.0, 100.0 * vid_idx / total_vids), indeterminate=False)
 
     return total_vids
+
+# =========================
+# NEW: Auto-yaw alignment helpers
+# =========================
+
+def _wrap_angle_deg(a: float) -> float:
+    """Wrap degrees to (-180, 180]."""
+    w = ((a + 180.0) % 360.0) - 180.0
+    return 180.0 if w <= -180.0 else w
+
+def detect_person_yaw_in_pano(frames_root: Path) -> float | None:
+    """
+    Detect person's yaw (degrees) in the first JPG frame of an equirectangular pano folder.
+    Returns None if detection fails or no frames/person found.
+    """
+    try:
+        from ultralytics import YOLO
+        import cv2
+        import numpy as np  # noqa: F401
+    except Exception:
+        ui_log("[AUTO-YAW] ultralytics/YOLO not available; skipping auto alignment.")
+        return None
+
+    img_paths = sorted(frames_root.glob("*.jpg"))
+    if not img_paths:
+        ui_log(f"[AUTO-YAW] No frames found in {frames_root}; skipping auto alignment.")
+        return None
+
+    model_name = "yolov8x-seg.pt"
+    try:
+        model = YOLO(model_name)
+    except Exception as e:
+        ui_log(f"[AUTO-YAW] Failed to load {model_name}: {e}")
+        return None
+
+    img_path = img_paths[0]
+    bgr = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
+    if bgr is None:
+        ui_log(f"[AUTO-YAW] Failed to read image: {img_path}")
+        return None
+
+    h, w = bgr.shape[:2]
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    try:
+        results = model.predict(
+            source=rgb,
+            conf=0.35,
+            iou=0.45,
+            imgsz=1024,
+            verbose=False,
+            classes=[0],  # person
+            device=None,
+        )
+    except Exception as e:
+        ui_log(f"[AUTO-YAW] Inference failed: {e}")
+        return None
+
+    if not results or results[0].masks is None or len(results[0].masks) == 0:
+        ui_log("[AUTO-YAW] No person detected in first frame; skipping auto alignment.")
+        return None
+
+    masks_tensor = results[0].masks.data.cpu().numpy()
+    person_small = (masks_tensor.max(axis=0) > 0.5).astype("uint8")
+    person = cv2.resize(person_small, (w, h), interpolation=cv2.INTER_NEAREST)
+
+    m = cv2.moments(person, binaryImage=True)
+    if m["m00"] <= 0:
+        ui_log("[AUTO-YAW] Empty person mask; skipping auto alignment.")
+        return None
+
+    cx = float(m["m10"] / m["m00"])  # [0,w)
+    u = (cx + 0.5) / float(w)          # [0,1)
+    yaw_deg = _wrap_angle_deg(u * 360.0 - 180.0)
+    ui_log(f"[AUTO-YAW] Person yaw estimated at {yaw_deg:.1f} deg from {img_path.name}.")
+    return yaw_deg
 
 # =========================
 # NEW: YOLO segmentation-based masking
@@ -423,6 +504,24 @@ def pipeline_thread(project_root: Path, seconds_per_frame: float, masking_enable
         ui_status("Preparing extraction…")
         video_count = extract_frames_with_progress(project_root, seconds_per_frame)
         frames_root = project_root / "frames"
+
+        # Phase B (prep): Auto-yaw alignment setup. Compute yaw shift so camera 0 faces the person
+        # and prepare pairs for the upcoming write_rotation_override() call.
+        try:
+            base_pairs = MASKING_PITCH_YAW_PAIRS if masking_enabled else NO_MASKING_PITCH_YAW_PAIRS
+            base_ref_idx = MASKING_REF_IDX if masking_enabled else NO_MASKING_REF_IDX
+            ui_status("Estimating person yaw for auto alignment...")
+            yaw_person = detect_person_yaw_in_pano(frames_root)
+            global _yaw_override_pairs
+            if yaw_person is not None:
+                yaw0 = float(base_pairs[0][1])
+                yaw_shift = _wrap_angle_deg(yaw_person - yaw0)
+                _yaw_override_pairs = [(float(p), _wrap_angle_deg(float(y) + yaw_shift)) for (p, y) in base_pairs]
+                ui_log(f"[AUTO-YAW] Will apply yaw shift of {yaw_shift:.1f} deg.")
+            else:
+                _yaw_override_pairs = base_pairs
+        except Exception as e:
+            ui_log(f"[AUTO-YAW] Alignment prep failed: {e}. Using default angles.")
 
         # Phase B: Angles & optional masking (no UI variables)
         if masking_enabled:
