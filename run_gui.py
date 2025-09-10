@@ -215,13 +215,15 @@ def _wrap_angle_deg(a: float) -> float:
 
 def detect_person_yaw_in_pano(frames_root: Path) -> float | None:
     """
-    Detect person's yaw (degrees) in the first JPG frame of an equirectangular pano folder.
-    Returns None if detection fails or no frames/person found.
+    Estimate person's yaw (deg, (-180,180]) robustly across up to 5 frames using YOLOv8-seg.
+    - Seam-robust via circular mean over per-column weights of the person mask.
+    - Multi-frame circular averaging with frame weights = total person pixels.
+    Returns None if detection or inference fails.
     """
     try:
         from ultralytics import YOLO
         import cv2
-        import numpy as np  # noqa: F401
+        import numpy as np
     except Exception:
         ui_log("[AUTO-YAW] ultralytics/YOLO not available; skipping auto alignment.")
         return None
@@ -231,6 +233,8 @@ def detect_person_yaw_in_pano(frames_root: Path) -> float | None:
         ui_log(f"[AUTO-YAW] No frames found in {frames_root}; skipping auto alignment.")
         return None
 
+    # Limit to first few frames for speed
+    sample_paths = img_paths[:5]
     model_name = "yolov8x-seg.pt"
     try:
         model = YOLO(model_name)
@@ -238,46 +242,74 @@ def detect_person_yaw_in_pano(frames_root: Path) -> float | None:
         ui_log(f"[AUTO-YAW] Failed to load {model_name}: {e}")
         return None
 
-    img_path = img_paths[0]
-    bgr = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
-    if bgr is None:
-        ui_log(f"[AUTO-YAW] Failed to read image: {img_path}")
+    def yaw_from_mask(person_mask: np.ndarray) -> tuple[float, float] | None:
+        # person_mask: HxW, bool/uint8; compute circular mean across columns
+        h, w = person_mask.shape
+        # weights per column
+        col_w = person_mask.sum(axis=0).astype(np.float64)
+        total = float(col_w.sum())
+        if total <= 0:
+            return None
+        xs = np.nonzero(col_w > 0)[0]
+        # complex sum of exp(i*theta) weighted by col counts, theta = 2π*u
+        u = (xs.astype(np.float64) + 0.5) / float(w)
+        theta = 2.0 * np.pi * u
+        c = (np.cos(theta) * col_w[xs]).sum()
+        s = (np.sin(theta) * col_w[xs]).sum()
+        angle = np.arctan2(s, c)  # (-π, π]
+        u_mean = (angle / (2.0 * np.pi)) % 1.0
+        yaw = (u_mean * 360.0) - 180.0
+        # return yaw and weight (total person pixels)
+        return float(_wrap_angle_deg(yaw)), total
+
+    # Accumulate across frames using circular mean with frame weights
+    C = 0.0
+    S = 0.0
+    used = 0
+    for img_path in sample_paths:
+        bgr = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
+        if bgr is None:
+            continue
+        h, w = bgr.shape[:2]
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        try:
+            results = model.predict(
+                source=rgb,
+                conf=0.35,
+                iou=0.45,
+                imgsz=1024,
+                verbose=False,
+                classes=[0],  # person
+                device=None,
+            )
+        except Exception as e:
+            ui_log(f"[AUTO-YAW] Inference failed on {img_path.name}: {e}")
+            continue
+
+        if not results or results[0].masks is None or len(results[0].masks) == 0:
+            continue
+        masks_tensor = results[0].masks.data.cpu().numpy()
+        person_small = (masks_tensor.max(axis=0) > 0.5).astype("uint8")
+        person = cv2.resize(person_small, (w, h), interpolation=cv2.INTER_NEAREST).astype(bool)
+        out = yaw_from_mask(person)
+        if out is None:
+            continue
+        yaw_deg, weight = out
+        # convert yaw_deg to angle on unit circle for circular mean
+        theta = (np.deg2rad(yaw_deg + 180.0)) % (2.0 * np.pi)  # map yaw to [0,2π) via u mapping
+        C += np.cos(theta) * weight
+        S += np.sin(theta) * weight
+        used += 1
+
+    if used == 0 or (C == 0.0 and S == 0.0):
+        ui_log("[AUTO-YAW] No reliable person detection across sampled frames; skipping auto alignment.")
         return None
 
-    h, w = bgr.shape[:2]
-    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    try:
-        results = model.predict(
-            source=rgb,
-            conf=0.35,
-            iou=0.45,
-            imgsz=1024,
-            verbose=False,
-            classes=[0],  # person
-            device=None,
-        )
-    except Exception as e:
-        ui_log(f"[AUTO-YAW] Inference failed: {e}")
-        return None
-
-    if not results or results[0].masks is None or len(results[0].masks) == 0:
-        ui_log("[AUTO-YAW] No person detected in first frame; skipping auto alignment.")
-        return None
-
-    masks_tensor = results[0].masks.data.cpu().numpy()
-    person_small = (masks_tensor.max(axis=0) > 0.5).astype("uint8")
-    person = cv2.resize(person_small, (w, h), interpolation=cv2.INTER_NEAREST)
-
-    m = cv2.moments(person, binaryImage=True)
-    if m["m00"] <= 0:
-        ui_log("[AUTO-YAW] Empty person mask; skipping auto alignment.")
-        return None
-
-    cx = float(m["m10"] / m["m00"])  # [0,w)
-    u = (cx + 0.5) / float(w)          # [0,1)
-    yaw_deg = _wrap_angle_deg(u * 360.0 - 180.0)
-    ui_log(f"[AUTO-YAW] Person yaw estimated at {yaw_deg:.1f} deg from {img_path.name}.")
-    return yaw_deg
+    angle = np.arctan2(S, C)
+    u_mean = (angle / (2.0 * np.pi)) % 1.0
+    yaw_mean = _wrap_angle_deg(u_mean * 360.0 - 180.0)
+    ui_log(f"[AUTO-YAW] Person yaw estimated at {yaw_mean:.1f} deg (from {used} frame(s)).")
+    return float(yaw_mean)
 
 # =========================
 # NEW: YOLO segmentation-based masking
@@ -515,9 +547,15 @@ def pipeline_thread(project_root: Path, seconds_per_frame: float, masking_enable
             global _yaw_override_pairs
             if yaw_person is not None:
                 yaw0 = float(base_pairs[0][1])
-                yaw_shift = _wrap_angle_deg(yaw_person - yaw0)
+                # Correct shift: rays map roughly to pano yaw = -(yaw_cam)
+                # We want camera0 center to align with yaw_person => yaw0' = yaw0 + Δ, and -(yaw0') ≈ yaw_person
+                # So Δ = wrap(-yaw_person - yaw0)
+                yaw_shift = _wrap_angle_deg(-yaw_person - yaw0)
                 _yaw_override_pairs = [(float(p), _wrap_angle_deg(float(y) + yaw_shift)) for (p, y) in base_pairs]
-                ui_log(f"[AUTO-YAW] Will apply yaw shift of {yaw_shift:.1f} deg.")
+                # Validate expected center yaw of camera0 after shift
+                expected_center = _wrap_angle_deg(-(yaw0 + yaw_shift))
+                residual = _wrap_angle_deg(yaw_person - expected_center)
+                ui_log(f"[AUTO-YAW] Applying yaw shift {yaw_shift:.1f} deg (expected center {expected_center:.1f}°, residual {residual:.1f}°).")
             else:
                 _yaw_override_pairs = base_pairs
         except Exception as e:
