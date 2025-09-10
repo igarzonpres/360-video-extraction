@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import cv2
+import re
 import numpy as np
 import PIL.ExifTags
 import PIL.Image
@@ -306,6 +307,14 @@ def render_perspective_images(
             )
 
             image_name = rig_config.cameras[cam_idx].image_prefix + pano_name
+            # Prefix file name with numeric subfolder (or folder name) to ensure uniqueness.
+            _img_rel = Path(image_name)
+            folder = _img_rel.parent.name
+            m = re.search(r"(\d+)$", folder)
+            folder_prefix = m.group(1) if m else folder
+            prefixed_name = f"{folder_prefix}_{_img_rel.name}"
+            image_name = str(_img_rel.parent / prefixed_name)
+
             # Build mask name as <image_base>.mask.png, avoiding double extensions like .jpg.png
             _img_rel = Path(image_name)
             mask_rel = _img_rel.parent / f"{_img_rel.stem}.mask.png"
