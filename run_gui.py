@@ -244,9 +244,10 @@ def _refresh_preview_grid(preview_root: Path):
 
     out_dir = preview_root / "output"
     imgs = _collect_preview_images(out_dir)
-    # Build 3x3 grid
+    # Build 1x9 horizontal strip
     for i, img_path in enumerate(imgs):
-        cell = Frame(preview_grid, bg="black")`r`n        cell.grid(row=0, column=i, padx=4, pady=4, sticky="n")
+        cell = Frame(preview_grid, bg="black")
+        cell.grid(row=0, column=i, padx=4, pady=4, sticky="n")
         if img_path and img_path.exists():
             try:
                 im = Image.open(img_path)
@@ -1116,5 +1117,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
 
