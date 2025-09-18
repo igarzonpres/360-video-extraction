@@ -104,8 +104,9 @@ _preview_imgs = []       # keep PhotoImage refs
 _yaw_vars: List[DoubleVar] | None = None  # per-view yaw
 _pitch_vars: List[DoubleVar] | None = None  # per-view pitch
 
-preview_canvas = None    # Canvas wrapper for horizontal scroll
+preview_canvas = None    # Canvas wrapper for scrollbars
 hscroll = None           # Horizontal scrollbar
+vscroll = None           # Vertical scrollbar
 
 def ui_status(msg: str):
     status_var.set(msg)
@@ -1103,14 +1104,18 @@ def main():
     preview_wrap = Frame(_root, bg="black")
     preview_wrap.pack(fill=BOTH, padx=16, pady=(6, 12))
     global preview_canvas
-    preview_canvas = Canvas(preview_wrap, bg="black", highlightthickness=0, height=300)
-    preview_canvas.pack(side="top", fill="x", expand=False)
-    global preview_grid, hscroll
+    preview_canvas = Canvas(preview_wrap, bg="black", highlightthickness=0, height=340)
+    # Allow both horizontal and vertical scrolling
+    preview_canvas.pack(side="left", fill=BOTH, expand=True)
+    global preview_grid, hscroll, vscroll
     preview_grid = Frame(preview_canvas, bg="black")
     preview_canvas.create_window((0, 0), window=preview_grid, anchor="nw")
+    # Scrollbars
+    vscroll = ttk.Scrollbar(preview_wrap, orient="vertical", command=preview_canvas.yview)
+    vscroll.pack(side="right", fill="y")
     hscroll = ttk.Scrollbar(preview_wrap, orient="horizontal", command=preview_canvas.xview)
     hscroll.pack(side="bottom", fill="x")
-    preview_canvas.configure(xscrollcommand=hscroll.set)
+    preview_canvas.configure(xscrollcommand=hscroll.set, yscrollcommand=vscroll.set)
 
     # ---------- Stage Controls ----------
     stage_btns = Frame(_root, bg="black")
