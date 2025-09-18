@@ -10,7 +10,7 @@ from typing import NamedTuple
 
 from tkinter import (
     Label, Entry, StringVar, DoubleVar, Frame, Checkbutton, BooleanVar,
-    filedialog, Button, Text, Scale, END, BOTH, DISABLED, NORMAL
+    filedialog, Button, Text, Scale, Canvas, END, BOTH, DISABLED, NORMAL
 )
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from tkinter import ttk
@@ -103,6 +103,9 @@ preview_grid = None      # Frame that holds 3x3 previews
 _preview_imgs = []       # keep PhotoImage refs
 _yaw_vars: List[DoubleVar] | None = None  # per-view yaw
 _pitch_vars: List[DoubleVar] | None = None  # per-view pitch
+
+preview_canvas = None    # Canvas wrapper for horizontal scroll
+hscroll = None           # Horizontal scrollbar
 
 def ui_status(msg: str):
     status_var.set(msg)
@@ -1097,8 +1100,17 @@ def main():
 
     # 3x3 preview grid
     global preview_grid
-    preview_grid = Frame(_root, bg="black")
-    preview_grid.pack(fill=BOTH, padx=16, pady=(6, 12))
+    preview_wrap = Frame(_root, bg="black")
+    preview_wrap.pack(fill=BOTH, padx=16, pady=(6, 12))
+    global preview_canvas
+    preview_canvas = Canvas(preview_wrap, bg="black", highlightthickness=0, height=300)
+    preview_canvas.pack(side="top", fill="x", expand=False)
+    global preview_grid, hscroll
+    preview_grid = Frame(preview_canvas, bg="black")
+    preview_canvas.create_window((0, 0), window=preview_grid, anchor="nw")
+    hscroll = ttk.Scrollbar(preview_wrap, orient="horizontal", command=preview_canvas.xview)
+    hscroll.pack(side="bottom", fill="x")
+    preview_canvas.configure(xscrollcommand=hscroll.set)
 
     # ---------- Stage Controls ----------
     stage_btns = Frame(_root, bg="black")
@@ -1117,6 +1129,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
 
 
 
