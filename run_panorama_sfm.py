@@ -1,4 +1,4 @@
-# run_panorama_sfm.py
+﻿# run_panorama_sfm.py
 import argparse
 import subprocess
 import sys
@@ -13,6 +13,7 @@ def main():
                    help="Override path to output dir (defaults to <base_dir>/output)")
     p.add_argument("--export_rc_xmp", action="store_true", help="Write XMP sidecars for RealityCapture")
     args = p.parse_args()
+    p.add_argument("--render_only", action="store_true", help="Only render images/masks")
 
     base_dir = Path(args.base_dir).resolve()
     input_dir = (args.input_image_path or (base_dir / "frames")).resolve()
@@ -26,7 +27,7 @@ def main():
     ]
     if args.export_rc_xmp:
         cmd.append("--export_rc_xmp")
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd + (["--render_only"] if args.render_only else []), check=True)
 
 if __name__ == "__main__":
     main()

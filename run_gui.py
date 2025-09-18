@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sys
 import json
 import cv2
@@ -274,7 +274,7 @@ def run_yolo_masking(frames_root: Path) -> int:
             return mask_bool
         mask = (mask_bool.astype(np.uint8) * 255)
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        # ~3px per iteration; mirror your script’s iterative growth behavior
+        # ~3px per iteration; mirror your scriptâ€™s iterative growth behavior
         step = 3
         iters = max(1, int(abs(grow_px) / step))
         out = cv2.dilate(mask, k, iterations=iters) if grow_px > 0 else cv2.erode(mask, k, iterations=iters)
@@ -286,7 +286,7 @@ def run_yolo_masking(frames_root: Path) -> int:
         return 0
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    ui_log(f"[YOLO] Loading {model_name} on {device} …")
+    ui_log(f"[YOLO] Loading {model_name} on {device} â€¦")
     model = YOLO(model_name)  # auto-download if missing
 
     total = len(img_paths)
@@ -324,14 +324,14 @@ def run_yolo_masking(frames_root: Path) -> int:
                 # Grow person region to be safe
                 person = morph_expand(person, grow_person_px)
 
-                # We remove the person → keep everything else
+                # We remove the person â†’ keep everything else
                 if remove_person:
                     keep_mask = ~person
                 else:
                     keep_mask = person
 
             # Apply in-place: black-out pixels where keep_mask is False
-            # (JPEG can’t store alpha; this mimics transparency by zeroing)
+            # (JPEG canâ€™t store alpha; this mimics transparency by zeroing)
             out_rgb = rgb.copy()
             out_rgb[~keep_mask] = 0  # black-out removed area
             out_bgr = cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)
@@ -408,12 +408,12 @@ def run_yolo_masking(frames_root: Path) -> int:  # type: ignore[override]
     masks_dir.mkdir(parents=True, exist_ok=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    ui_log(f"[YOLO] Loading {model_name} on {device} …")
+    ui_log(f"[YOLO] Loading {model_name} on {device} â€¦")
     model = YOLO(model_name)
 
     total = len(img_paths)
     processed = 0
-    ui_status("Generating YOLO masks…")
+    ui_status("Generating YOLO masksâ€¦")
     ui_sub_progress(0, indeterminate=False)
 
     last_update = time.time()
@@ -463,7 +463,7 @@ def run_yolo_masking(frames_root: Path) -> int:  # type: ignore[override]
 # External steps (threaded helpers)
 # =========================
 
-def run_panorama_sfm(project_root: Path) -> bool:
+def run_panorama_sfm(project_root: Path, render_only: bool = False) -> bool:
     wrapper = Path(__file__).parent / "run_panorama_sfm.py"
     if not wrapper.exists():
         ui_log(f"[ERROR] Missing run_panorama_sfm.py next to the GUI: {wrapper}")
@@ -472,12 +472,15 @@ def run_panorama_sfm(project_root: Path) -> bool:
     # Build wrapper command and pass optional XMP export
     cmd = [sys.executable, str(wrapper), str(project_root)]
     try:
+    if render_only:
+        cmd.append("--render_only")
+    try:
         if export_rc_xmp.get():
             cmd.append("--export_rc_xmp")
     except Exception:
         pass
     ui_log(f"[RUN] {' '.join(cmd)}")
-    ui_status("Running COLMAP pipeline…")
+    ui_status("Rendering images (render_only)" if render_only else "Running COLMAP pipeline…")
 
     # Spin sub-progress as an activity indicator
     ui_sub_progress(indeterminate=True)
@@ -524,7 +527,7 @@ def delete_pano_camera0(project_root: Path) -> None:
 
     cmd = [sys.executable, str(deleter), str(project_root)]
     ui_log(f"[RUN] {' '.join(cmd)}")
-    ui_status("Deleting pano_camera0 folders…")
+    ui_status("Deleting pano_camera0 foldersâ€¦")
     ui_sub_progress(indeterminate=True)
     try:
         subprocess.run(cmd, check=True)
@@ -543,7 +546,7 @@ def run_segment_images(project_root: Path) -> bool:
 
     cmd = [sys.executable, str(seg)]
     ui_log(f"[RUN] {' '.join(cmd)} (cwd={project_root})")
-    ui_status("Segmenting COLMAP images by clip prefix…")
+    ui_status("Segmenting COLMAP images by clip prefixâ€¦")
     ui_sub_progress(indeterminate=True)
     try:
         subprocess.run(cmd, check=True, cwd=project_root)
@@ -589,6 +592,12 @@ def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enable
         ui_log(f"[OK] Wrote rotation_override.json (no masking) in {project_root}")
 
     ui_main_progress(33, indeterminate=False)
+    # Render perspective images/masks (pre-indexing) via COLMAP wrapper
+    ui_status("Rendering perspective images from panoramas…")
+    ok = run_panorama_sfm(project_root, render_only=True)
+    if not ok:
+        ui_log("[ERROR] Rendering step failed. See log.")
+        return SplitResult(project_root, seconds_per_frame, masking_enabled, video_count)
     return SplitResult(
         project_root=project_root,
         seconds_per_frame=seconds_per_frame,
@@ -812,9 +821,9 @@ def main():
             icon_label.image = icon
             icon_label.pack(side="left", padx=(0, 12))
         except Exception:
-            Label(header, text="📁", font=("Arial", 44), bg="black", fg="white").pack(side="left", padx=(0, 12))
+            Label(header, text="ðŸ“", font=("Arial", 44), bg="black", fg="white").pack(side="left", padx=(0, 12))
     else:
-        Label(header, text="📁", font=("Arial", 44), bg="black", fg="white").pack(side="left", padx=(0, 12))
+        Label(header, text="ðŸ“", font=("Arial", 44), bg="black", fg="white").pack(side="left", padx=(0, 12))
 
     Label(header,
           text="Insta360 Video(s) To Training Format Pipeline",
@@ -867,7 +876,7 @@ def main():
     # ---------- Buttons ----------
     btns = Frame(_root, bg="black")
     btns.pack()
-    browse_btn = Button(btns, text="Browse…", command=browse_folder)
+    browse_btn = Button(btns, text="Browseâ€¦", command=browse_folder)
     browse_btn.pack(side="left", padx=6)
     last_btn = Button(btns, text="Run Last Chosen Folder", state=DISABLED, command=run_last)
     last_btn.pack(side="left", padx=6)
