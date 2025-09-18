@@ -654,7 +654,6 @@ def run_panorama_sfm(project_root: Path, render_only: bool = False) -> bool:
 
     # Build wrapper command and pass optional XMP export
     cmd = [sys.executable, str(wrapper), str(project_root)]
-    try:
     if render_only:
         cmd.append("--render_only")
     try:
