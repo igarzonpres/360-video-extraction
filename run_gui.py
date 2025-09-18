@@ -40,12 +40,12 @@ NO_MASKING_PITCH_YAW_PAIRS = [
     (0, 90),   # Reference Pose (ref_idx = 0)
     (32, 0),
     (-42, 0),
-    (0, 42),
+    (0, 33),  # hay que bajarlo de 42 
     (0, -25),
     (42, 180),
     (-32, 180),
     (0, 205),
-    (0, 138),
+    (0, 142), # hay que subirlo de 138
 ]
 NO_MASKING_REF_IDX = 0
 
