@@ -1,4 +1,4 @@
-"""
+﻿"""
 An example for running incremental SfM on 360 spherical panorama images.
 """
 
@@ -80,7 +80,7 @@ def get_virtual_camera_rays(camera: pycolmap.Camera) -> np.ndarray:
 def spherical_img_from_cam(image_size, rays_in_cam: np.ndarray) -> np.ndarray:
     """Project rays into a 360 panorama (spherical) image."""
     if image_size[0] != image_size[1] * 2:
-        raise ValueError("Only 360° panoramas are supported.")
+        raise ValueError("Only 360Â° panoramas are supported.")
     if rays_in_cam.ndim != 2 or rays_in_cam.shape[1] != 3:
         raise ValueError(f"{rays_in_cam.shape=} but expected (N,3).")
     r = rays_in_cam.T
@@ -129,7 +129,7 @@ def create_pano_rig_config(
                 cam_from_pano_rotation @ cams_from_pano_rotation[ref_idx].T
             )
 
-            # Views 1–5 = right lens, 6–10 = left lens
+            # Views 1â€“5 = right lens, 6â€“10 = left lens
             side = 1 if idx <= 4 else -1
             local_offset = np.array([-baseline * side, 0, 0])
             translation = cam_from_ref_rotation @ local_offset
@@ -222,7 +222,7 @@ def render_perspective_images(
         rot_txt = " ".join(f"{v:.15g}" for v in r.flatten(order="C"))
         pos_txt = "0 0 0"
 
-        xmp = f"""<?xpacket begin='﻿' id='W5M0MpCehiHzreSzNTczkc9d'?>
+        xmp = f"""<?xpacket begin='ï»¿' id='W5M0MpCehiHzreSzNTczkc9d'?>
 <x:xmpmeta xmlns:x='adobe:ns:meta/'>
  <rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>
   <rdf:Description xmlns:xcr='http://www.capturingreality.com/ns/xcr/1.1#'
@@ -273,7 +273,7 @@ def render_perspective_images(
 
         pano_height, pano_width, *_ = pano_image.shape
         if pano_width != pano_height * 2:
-            raise ValueError("Only 360° panoramas are supported.")
+            raise ValueError("Only 360Â° panoramas are supported.")
 
         if camera is None:  # First image.
             camera = create_virtual_camera(pano_height)
@@ -398,6 +398,8 @@ def run(args):
         export_xmp=bool(getattr(args, 'export_rc_xmp', False)),
     )
 
+    if getattr(args, "render_only", False):
+        return
     # (RC flatten export removed; keep folder structure intact)
 
     pycolmap.set_random_seed(0)
@@ -451,4 +453,5 @@ if __name__ == "__main__":
     parser.add_argument("--output_path", type=Path, required=True)
     parser.add_argument("--matcher", default="sequential", choices=["sequential", "exhaustive", "vocabtree", "spatial"])
     parser.add_argument("--export_rc_xmp", action="store_true", help="Write XMP sidecars for RealityCapture (xcr schema)")
+    parser.add_argument("--render_only", action="store_true", help="Only render images/masks; skip extraction/mapping")
     run(parser.parse_args())
