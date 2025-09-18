@@ -6,6 +6,7 @@ import time
 import threading
 import subprocess
 from pathlib import Path
+from typing import NamedTuple
 
 from tkinter import (
     Label, Entry, StringVar, Frame, Checkbutton, BooleanVar,
@@ -84,8 +85,14 @@ log_text = None
 use_masking = None
 frame_interval = None
 drop_zone = None
-run_btn = None
 browse_btn = None
+last_btn = None
+split_btn = None
+align_btn = None
+
+_last_folder = None
+_selected_project = None
+_split_result = None
 
 def ui_status(msg: str):
     status_var.set(msg)
@@ -124,11 +131,35 @@ def ui_sub_progress(value: float | None = None, indeterminate: bool = False):
         progress_sub["value"] = 0 if value is None else value
     _root.update_idletasks()
 
+
+def refresh_action_buttons():
+    project_exists = _selected_project is not None and Path(_selected_project).exists()
+    if split_btn is not None:
+        split_btn.configure(state=NORMAL if project_exists else DISABLED)
+
+    align_ready = (_split_result is not None and
+                   Path(_split_result.project_root).exists())
+    if align_btn is not None:
+        align_btn.configure(state=NORMAL if align_ready else DISABLED)
+
+    last_ready = _last_folder is not None and Path(_last_folder).exists()
+    if last_btn is not None:
+        last_btn.configure(state=NORMAL if last_ready else DISABLED)
+
+
 def ui_disable_inputs(disabled=True):
-    state = DISABLED if disabled else NORMAL
-    drop_zone.configure(state="disabled" if disabled else "normal")
-    run_btn.configure(state=state)
-    browse_btn.configure(state=state)
+    if disabled:
+        if drop_zone is not None:
+            drop_zone.configure(state="disabled")
+        for btn in (browse_btn, last_btn, split_btn, align_btn):
+            if btn is not None:
+                btn.configure(state=DISABLED)
+    else:
+        if drop_zone is not None:
+            drop_zone.configure(state="normal")
+        if browse_btn is not None:
+            browse_btn.configure(state=NORMAL)
+        refresh_action_buttons()
     # removed: loop over _yolo_widgets
 
 
@@ -528,72 +559,122 @@ def run_segment_images(project_root: Path) -> bool:
 # End-to-end pipeline (threaded)
 # =========================
 
-def pipeline_thread(project_root: Path, seconds_per_frame: float, masking_enabled: bool):
+
+class SplitResult(NamedTuple):
+    project_root: Path
+    seconds_per_frame: float
+    masking_enabled: bool
+    video_count: int
+
+
+
+def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enabled: bool) -> SplitResult:
+    ui_main_progress(0, indeterminate=False)
+    ui_status("Preparing extraction...")
+    video_count = extract_frames_with_progress(project_root, seconds_per_frame)
+    frames_root = project_root / "frames"
+
+    if masking_enabled:
+        ui_status("Writing rotation override (masking)...")
+        write_rotation_override(project_root, MASKING_PITCH_YAW_PAIRS, MASKING_REF_IDX)
+        ui_log(f"[OK] Wrote rotation_override.json (masking) in {project_root}")
+
+        ui_status("Masking frames (fixed YOLO settings)...")
+        processed = run_yolo_masking(frames_root=frames_root)
+        if processed == 0:
+            ui_log("[WARN] No frames were masked (or masking skipped due to error). Continuing...")
+    else:
+        ui_status("Writing rotation override (no masking)...")
+        write_rotation_override(project_root, NO_MASKING_PITCH_YAW_PAIRS, NO_MASKING_REF_IDX)
+        ui_log(f"[OK] Wrote rotation_override.json (no masking) in {project_root}")
+
+    ui_main_progress(33, indeterminate=False)
+    return SplitResult(
+        project_root=project_root,
+        seconds_per_frame=seconds_per_frame,
+        masking_enabled=masking_enabled,
+        video_count=video_count,
+    )
+
+
+
+def run_align_stage(project_root: Path, video_count: int) -> bool:
+    ui_main_progress(33, indeterminate=False)
+
+    if not run_panorama_sfm(project_root):
+        ui_status("COLMAP failed. See log.")
+        return False
+
+    ui_main_progress(66, indeterminate=False)
+
+    delete_pano_camera0(project_root)
+    ui_main_progress(90, indeterminate=False)
+
+    if video_count > 1:
+        ui_log(f"[INFO] Multiple videos detected ({video_count}). Running segment_images...")
+        run_segment_images(project_root)
+
+    ui_main_progress(100, indeterminate=False)
+    ui_status("All done.")
+    ui_log("[DONE] Pipeline complete.")
+    return True
+
+
+
+def _stop_progress_bars():
+    try:
+        progress_main.stop()
+        progress_sub.stop()
+    except Exception:
+        pass
+
+
+
+def _split_thread(project_root: Path, seconds_per_frame: float, masking_enabled: bool) -> None:
+    global _split_result
     try:
         ui_disable_inputs(True)
-
-        # Phase A: Extraction
-        ui_main_progress(0, indeterminate=False)
-        ui_status("Preparing extraction…")
-        video_count = extract_frames_with_progress(project_root, seconds_per_frame)
-        frames_root = project_root / "frames"
-
-        # Phase B: Angles & optional masking (no UI variables)
-        if masking_enabled:
-            ui_status("Writing rotation override (masking)…")
-            write_rotation_override(project_root, MASKING_PITCH_YAW_PAIRS, MASKING_REF_IDX)
-            ui_log(f"[OK] Wrote rotation_override.json (masking) in {project_root}")
-
-            ui_status("Masking frames (fixed YOLO settings)…")
-            processed = run_yolo_masking(frames_root=frames_root)
-            if processed == 0:
-                ui_log("[WARN] No frames were masked (or masking skipped due to error). Continuing…")
-        else:
-            ui_status("Writing rotation override (no masking)…")
-            write_rotation_override(project_root, NO_MASKING_PITCH_YAW_PAIRS, NO_MASKING_REF_IDX)
-            ui_log(f"[OK] Wrote rotation_override.json (no masking) in {project_root}")
-
-        ui_main_progress(33, indeterminate=False)
-
-        # Phase C: COLMAP (stream logs into GUI)
-        if not run_panorama_sfm(project_root):
-            ui_status("COLMAP failed. See log.")
-            return
-
-        ui_main_progress(66, indeterminate=False)
-
-        # Phase D: Delete pano_camera0
-        delete_pano_camera0(project_root)
-        ui_main_progress(90, indeterminate=False)
-
-        # Phase E: Segment images if more than one video
-        if video_count > 1:
-            ui_log(f"[INFO] Multiple videos detected ({video_count}). Running segment_images…")
-            run_segment_images(project_root)
-
-        ui_main_progress(100, indeterminate=False)
-        ui_status("All done.")
-        ui_log("[DONE] Pipeline complete.")
-
+        ui_sub_progress(0, indeterminate=False)
+        _split_result = None
+        result = run_split_stage(project_root, seconds_per_frame, masking_enabled)
+        _split_result = result
+        ui_status("Splitting complete. Ready for alignment.")
+        ui_log("[OK] Splitting finished. Press START ALIGNING to continue.")
+    except Exception as exc:
+        _split_result = None
+        ui_sub_progress(0, indeterminate=False)
+        ui_log(f"[ERROR] Splitting failed: {exc}")
+        ui_status("Splitting failed. See log.")
     finally:
-        try:
-            progress_main.stop()
-            progress_sub.stop()
-        except Exception:
-            pass
+        _stop_progress_bars()
         ui_disable_inputs(False)
+        refresh_action_buttons()
+
+
+
+def _align_thread(split_result: SplitResult) -> None:
+    try:
+        ui_disable_inputs(True)
+        ui_sub_progress(0, indeterminate=False)
+        success = run_align_stage(split_result.project_root, split_result.video_count)
+        if not success:
+            ui_log("[WARN] Alignment stage did not complete successfully.")
+    except Exception as exc:
+        ui_sub_progress(0, indeterminate=False)
+        ui_log(f"[ERROR] Alignment failed: {exc}")
+        ui_status("Alignment failed. See log.")
+    finally:
+        _stop_progress_bars()
+        ui_disable_inputs(False)
+        refresh_action_buttons()
+
 
 
 # =========================
 # GUI
 # =========================
 
-_last_folder = None  # remember last path for re-run
-
-def start_pipeline_with_path(folder_path: Path):
-    global _last_folder
-    _last_folder = folder_path
-
+def _read_seconds_per_frame() -> float:
     try:
         seconds = float(frame_interval.get())
         if seconds <= 0:
@@ -601,26 +682,46 @@ def start_pipeline_with_path(folder_path: Path):
     except Exception:
         seconds = 1.0
         frame_interval.set("1")
+    return seconds
 
-    threading.Thread(
-        target=pipeline_thread,
-        args=(folder_path, seconds, use_masking.get()),
-        daemon=True
-    ).start()
+
+def _read_masking_flag() -> bool:
+    try:
+        return bool(use_masking.get())
+    except Exception:
+        return False
+
+
+def start_pipeline_with_path(folder_path: Path):
+    global _last_folder, _selected_project, _split_result
+    folder_path = Path(folder_path)
+    if not folder_path.exists():
+        ui_log(f"[ERROR] Folder does not exist: {folder_path}")
+        return
+
+    _selected_project = folder_path
+    _last_folder = folder_path
+    _split_result = None
+
+    ui_status(f"Selected folder: {folder_path}")
+    ui_log(f"[INFO] Selected folder: {folder_path}")
+
+    refresh_action_buttons()
+
 
 def on_drop(event):
     folder_path = Path(event.data.strip("{}"))
     if folder_path.is_dir():
-        run_btn.configure(state=NORMAL)  # NEW: enable re-run
         start_pipeline_with_path(folder_path)
     else:
         ui_log("[ERROR] Please drop a valid folder.")
 
+
 def browse_folder():
     chosen = filedialog.askdirectory(title="Select folder containing 360 video(s)")
     if chosen:
-        run_btn.configure(state=NORMAL)  # NEW: enable re-run
         start_pipeline_with_path(Path(chosen))
+
 
 def run_last():
     if _last_folder and Path(_last_folder).exists():
@@ -628,13 +729,67 @@ def run_last():
     else:
         ui_log("[ERROR] No valid last folder. Please Browse or Drop a folder.")
 
+
+def on_start_split():
+    global _split_result, _selected_project
+    if _selected_project is None:
+        ui_log("[ERROR] Please select a folder before starting the split stage.")
+        return
+
+    project_root = Path(_selected_project)
+    if not project_root.exists():
+        ui_log(f"[ERROR] Selected folder is missing: {project_root}")
+        _selected_project = None
+        refresh_action_buttons()
+        return
+
+    seconds = _read_seconds_per_frame()
+    masking = _read_masking_flag()
+
+    _split_result = None
+    refresh_action_buttons()
+
+    if split_btn is not None:
+        split_btn.configure(state=DISABLED)
+    if align_btn is not None:
+        align_btn.configure(state=DISABLED)
+
+    threading.Thread(
+        target=_split_thread,
+        args=(project_root, seconds, masking),
+        daemon=True
+    ).start()
+
+
+def on_start_align():
+    if _split_result is None:
+        ui_log("[ERROR] Run START spltting before alignment.")
+        return
+
+    project_root = Path(_split_result.project_root)
+    if not project_root.exists():
+        ui_log(f"[ERROR] Project folder is missing: {project_root}")
+        ui_status("Alignment aborted. Folder missing.")
+        refresh_action_buttons()
+        return
+
+    if align_btn is not None:
+        align_btn.configure(state=DISABLED)
+
+    threading.Thread(
+        target=_align_thread,
+        args=(_split_result,),
+        daemon=True
+    ).start()
+
+
 def on_masking_toggle():
     pass
 
 
 def main():
     global _root, status_var, progress_main, progress_sub, log_text
-    global use_masking, frame_interval, drop_zone, run_btn, browse_btn
+    global use_masking, frame_interval, drop_zone, browse_btn, last_btn, split_btn, align_btn
     global export_rc_xmp
     global yolo_model_path, yolo_conf, yolo_dilate_px, yolo_invert_mask, yolo_apply_to_rgb, _yolo_widgets
 
@@ -714,8 +869,8 @@ def main():
     btns.pack()
     browse_btn = Button(btns, text="Browse…", command=browse_folder)
     browse_btn.pack(side="left", padx=6)
-    run_btn = Button(btns, text="Run Last Chosen Folder", state=DISABLED, command=run_last)
-    run_btn.pack(side="left", padx=6)
+    last_btn = Button(btns, text="Run Last Chosen Folder", state=DISABLED, command=run_last)
+    last_btn.pack(side="left", padx=6)
 
     # ---------- Progress ----------
     prog = Frame(_root, bg="black")
@@ -738,6 +893,16 @@ def main():
     log_text = Text(log_frame, height=12, bg="#111", fg="#ddd", insertbackground="white")
     log_text.pack(fill=BOTH, expand=True)
     log_text.configure(state=DISABLED)
+
+    # ---------- Stage Controls ----------
+    stage_btns = Frame(_root, bg="black")
+    stage_btns.pack(pady=(0, 12))
+    split_btn = Button(stage_btns, text="START spltting", state=DISABLED, command=on_start_split)
+    split_btn.pack(side="left", padx=6)
+    align_btn = Button(stage_btns, text="START ALIGNING", state=DISABLED, command=on_start_align)
+    align_btn.pack(side="left", padx=6)
+
+    refresh_action_buttons()
 
     # initialize YOLO controls state
     on_masking_toggle()
