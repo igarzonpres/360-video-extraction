@@ -18,6 +18,7 @@ from PIL import Image, ImageTk
 
 import numpy as np  # NEW: for mask processing
 from typing import List, Tuple
+import shutil
 
 # =========================
 # Angle profiles & helpers
@@ -79,7 +80,7 @@ def list_videos(video_dir: Path):
 
 _root = None
 status_var = None
-progress_main = None
+# progress_main = None
 progress_sub = None
 log_text = None
 
@@ -119,18 +120,18 @@ def ui_log(msg: str):
     log_text.configure(state=DISABLED)
     _root.update_idletasks()
 
-def ui_main_progress(value: float | None = None, indeterminate: bool = False):
-    try:
-        progress_main.stop()
-    except Exception:
-        pass
-    if indeterminate:
-        progress_main["mode"] = "indeterminate"
-        progress_main.start(12)
-    else:
-        progress_main["mode"] = "determinate"
-        progress_main["value"] = 0 if value is None else value
-    _root.update_idletasks()
+# def ui_main_progress(value: float | None = None, indeterminate: bool = False):
+#     try:
+#         progress_main.stop()
+#     except Exception:
+#         pass
+#     if indeterminate:
+#         progress_main["mode"] = "indeterminate"
+#         progress_main.start(12)
+#     else:
+#         progress_main["mode"] = "determinate"
+#         progress_main["value"] = 0 if value is None else value
+#     _root.update_idletasks()
 
 def ui_sub_progress(value: float | None = None, indeterminate: bool = False):
     try:
@@ -255,7 +256,7 @@ def _refresh_preview_grid(preview_root: Path):
         if img_path and img_path.exists():
             try:
                 im = Image.open(img_path)
-                im.thumbnail((220, 220))
+                im.thumbnail((175, 175))
                 ph = ImageTk.PhotoImage(im)
                 lbl = Label(cell, image=ph, bg="black")
                 lbl.image = ph
@@ -266,11 +267,24 @@ def _refresh_preview_grid(preview_root: Path):
         else:
             Label(cell, text="(no image)", bg="black", fg="white").pack()
         # Sliders
+        # Label(cell, text=f"View {i}", bg="black", fg="#ccc").pack()
+        # yaw = _yaw_vars[i]
+        # pitch = _pitch_vars[i]
+        # Scale(cell, from_=-180, to=180, orient="horizontal", length=150, label="Yaw", variable=yaw).pack()
+        # Scale(cell, from_=-90, to=90, orient="horizontal", length=150, label="Pitch", variable=pitch).pack()
         Label(cell, text=f"View {i}", bg="black", fg="#ccc").pack()
         yaw = _yaw_vars[i]
         pitch = _pitch_vars[i]
-        Scale(cell, from_=-180, to=180, orient="horizontal", length=200, label="Yaw", variable=yaw).pack()
-        Scale(cell, from_=-90, to=90, orient="horizontal", length=200, label="Pitch", variable=pitch).pack()
+        # Yaw row: slider + numeric entry
+        yaw_row = Frame(cell, bg="black"); yaw_row.pack()
+        Scale(yaw_row, from_=-180, to=180, orient="horizontal",
+              length=130, label="Yaw", variable=yaw).pack(side="left")
+        Entry(yaw_row, textvariable=yaw, width=6, justify="right").pack(side="left", padx=(4,0))
+        # Pitch row: slider + numeric entry
+        pitch_row = Frame(cell, bg="black"); pitch_row.pack()
+        Scale(pitch_row, from_=-90, to=90, orient="horizontal",
+              length=130, label="Pitch", variable=pitch).pack(side="left")
+        Entry(pitch_row, textvariable=pitch, width=6, justify="right").pack(side="left", padx=(4,0))
 
 
 def _on_compute_views():
@@ -411,7 +425,7 @@ def extract_frames_with_progress(video_dir: Path, interval_seconds: float) -> in
         ui_sub_progress(100.0, indeterminate=False)
         ui_log(f"[OK] Saved {saved_idx} frames into {output_base_dir}")
 
-        ui_main_progress(min(100.0, 100.0 * vid_idx / total_vids), indeterminate=False)
+        # ui_main_progress(min(100.0, 100.0 * vid_idx / total_vids), indeterminate=False)
 
     return total_vids
 
@@ -757,7 +771,7 @@ class SplitResult(NamedTuple):
 
 
 def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enabled: bool) -> SplitResult:
-    ui_main_progress(0, indeterminate=False)
+    # ui_main_progress(0, indeterminate=False)
     ui_status("Preparing extraction...")
     video_count = extract_frames_with_progress(project_root, seconds_per_frame)
     frames_root = project_root / "frames"
@@ -776,7 +790,7 @@ def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enable
         write_rotation_override(project_root, _current_pairs(), NO_MASKING_REF_IDX)
         ui_log(f"[OK] Wrote rotation_override.json (no masking) in {project_root}")
 
-    ui_main_progress(33, indeterminate=False)
+    # ui_main_progress(33, indeterminate=False)
     # Render perspective images/masks (pre-indexing) via COLMAP wrapper
     ui_status("Rendering perspective images from panoramas…")
     ok = run_panorama_sfm(project_root, render_only=True)
@@ -793,22 +807,22 @@ def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enable
 
 
 def run_align_stage(project_root: Path, video_count: int) -> bool:
-    ui_main_progress(33, indeterminate=False)
+    #ui_main_progress(33, indeterminate=False)
 
     if not run_panorama_sfm(project_root):
         ui_status("COLMAP failed. See log.")
         return False
 
-    ui_main_progress(66, indeterminate=False)
+    #ui_main_progress(66, indeterminate=False)
 
     delete_pano_camera0(project_root)
-    ui_main_progress(90, indeterminate=False)
+    #ui_main_progress(90, indeterminate=False)
 
     if video_count > 1:
         ui_log(f"[INFO] Multiple videos detected ({video_count}). Running segment_images...")
         run_segment_images(project_root)
 
-    ui_main_progress(100, indeterminate=False)
+    #ui_main_progress(100, indeterminate=False)
     ui_status("All done.")
     ui_log("[DONE] Pipeline complete.")
     return True
@@ -817,7 +831,7 @@ def run_align_stage(project_root: Path, video_count: int) -> bool:
 
 def _stop_progress_bars():
     try:
-        progress_main.stop()
+        # progress_main.stop()
         progress_sub.stop()
     except Exception:
         pass
@@ -827,6 +841,15 @@ def _stop_progress_bars():
 def _split_thread(project_root: Path, seconds_per_frame: float, masking_enabled: bool) -> None:
     global _split_result
     try:
+    # remove preview folder before splitting
+        preview_dir = project_root / "preview"
+        if preview_dir.exists():
+            try:
+                shutil.rmtree(preview_dir)
+                ui_log(f"[OK] Removed preview folder: {preview_dir}")
+            except Exception as e:
+                ui_log(f"[WARN] Could not remove preview folder {preview_dir}: {e}")
+
         ui_disable_inputs(True)
         ui_sub_progress(0, indeterminate=False)
         _split_result = None
@@ -985,7 +1008,7 @@ def on_masking_toggle():
 
 
 def main():
-    global _root, status_var, progress_main, progress_sub, log_text
+    global _root, status_var, progress_sub, log_text
     global use_masking, frame_interval, drop_zone, browse_btn, last_btn, split_btn, align_btn
     global export_rc_xmp
     global yolo_model_path, yolo_conf, yolo_dilate_px, yolo_invert_mask, yolo_apply_to_rgb, _yolo_widgets
@@ -1009,9 +1032,9 @@ def main():
             icon_label.image = icon
             icon_label.pack(side="left", padx=(0, 12))
         except Exception:
-            Label(header, text="ðŸ“", font=("Arial", 44), bg="black", fg="white").pack(side="left", padx=(0, 12))
+            Label(header, text="📁", font=("Arial", 44), bg="black", fg="white").pack(side="left", padx=(0, 12))
     else:
-        Label(header, text="ðŸ“", font=("Arial", 44), bg="black", fg="white").pack(side="left", padx=(0, 12))
+        Label(header, text="📁", font=("Arial", 44), bg="black", fg="white").pack(side="left", padx=(0, 12))
 
     Label(header,
           text="Insta360 Video(s) To Training Format Pipeline",
@@ -1062,20 +1085,21 @@ def main():
     drop_zone.dnd_bind('<<Drop>>', on_drop)
 
     # ---------- Buttons ----------
+    btn_style = {"bg":"#333","fg":"white","activebackground":"#444","activeforeground":"white","disabledforeground":"#888"}
     btns = Frame(_root, bg="black")
     btns.pack()
-    browse_btn = Button(btns, text="Browseâ€¦", command=browse_folder)
+    browse_btn = Button(btns, text="Browse", command=browse_folder, **btn_style)
     browse_btn.pack(side="left", padx=6)
-    last_btn = Button(btns, text="Run Last Chosen Folder", state=DISABLED, command=run_last)
+    last_btn = Button(btns, text="Run Last Chosen Folder", state=DISABLED, command=run_last, **btn_style)
     last_btn.pack(side="left", padx=6)
 
     # ---------- Progress ----------
     prog = Frame(_root, bg="black")
     prog.pack(fill=BOTH, padx=16, pady=(12, 4))
 
-    Label(prog, text="Overall Progress", bg="black", fg="#ccc").pack(anchor="w")
-    progress_main = ttk.Progressbar(prog, orient="horizontal", mode="determinate", length=680)
-    progress_main.pack(pady=(2, 8))
+    # Label(prog, text="Overall Progress", bg="black", fg="#ccc").pack(anchor="w")
+    # progress_main = ttk.Progressbar(prog, orient="horizontal", mode="determinate", length=680)
+    # progress_main.pack(pady=(2, 8))
 
     Label(prog, text="Current Task", bg="black", fg="#ccc").pack(anchor="w")
     progress_sub = ttk.Progressbar(prog, orient="horizontal", mode="determinate", length=680)
@@ -1084,11 +1108,19 @@ def main():
     status_var = StringVar(value="Idle.")
     Label(_root, textvariable=status_var, bg="black", fg="white").pack(pady=(0, 6))
 
+    # ---------- Stage Controls ----------
+    stage_btns = Frame(_root, bg="black")
+    stage_btns.pack(pady=(0, 12))
+    split_btn = Button(stage_btns, text="START SPLITTING", state=DISABLED, command=on_start_split, **btn_style)
+    split_btn.pack(side="left", padx=6)
+    align_btn = Button(stage_btns, text="START ALIGNING", state=DISABLED, command=on_start_align, **btn_style)
+    align_btn.pack(side="left", padx=6)
+
     # ---------- Log ----------
     log_frame = Frame(_root, bg="black")
     log_frame.pack(fill=BOTH, expand=True, padx=16, pady=(0, 12))
-    log_text = Text(log_frame, height=12, bg="#111", fg="#ddd", insertbackground="white")
-    log_text.pack(fill=BOTH, expand=True)
+    log_text = Text(log_frame, height=6, bg="#111", fg="#ddd", insertbackground="white")
+    log_text.pack(fill=BOTH)
     log_text.configure(state=DISABLED)
 
     # ---------- Preview Controls ----------
@@ -1104,26 +1136,20 @@ def main():
     preview_wrap = Frame(_root, bg="black")
     preview_wrap.pack(fill=BOTH, padx=16, pady=(6, 12))
     global preview_canvas
-    preview_canvas = Canvas(preview_wrap, bg="black", highlightthickness=0, height=340)
+    preview_canvas = Canvas(preview_wrap, bg="black", highlightthickness=0, height=500)
     # Allow both horizontal and vertical scrolling
     preview_canvas.pack(side="left", fill=BOTH, expand=True)
     global preview_grid, hscroll, vscroll
     preview_grid = Frame(preview_canvas, bg="black")
     preview_canvas.create_window((0, 0), window=preview_grid, anchor="nw")
     # Scrollbars
-    vscroll = ttk.Scrollbar(preview_wrap, orient="vertical", command=preview_canvas.yview)
-    vscroll.pack(side="right", fill="y")
-    hscroll = ttk.Scrollbar(preview_wrap, orient="horizontal", command=preview_canvas.xview)
-    hscroll.pack(side="bottom", fill="x")
-    preview_canvas.configure(xscrollcommand=hscroll.set, yscrollcommand=vscroll.set)
+    # vscroll = ttk.Scrollbar(preview_wrap, orient="vertical", command=preview_canvas.yview)
+    # vscroll.pack(side="right", fill="y")
+    # hscroll = ttk.Scrollbar(preview_wrap, orient="horizontal", command=preview_canvas.xview)
+    # hscroll.pack(side="bottom", fill="x")
+    # preview_canvas.configure(xscrollcommand=hscroll.set, yscrollcommand=vscroll.set)
 
-    # ---------- Stage Controls ----------
-    stage_btns = Frame(_root, bg="black")
-    stage_btns.pack(pady=(0, 12))
-    split_btn = Button(stage_btns, text="START spltting", state=DISABLED, command=on_start_split)
-    split_btn.pack(side="left", padx=6)
-    align_btn = Button(stage_btns, text="START ALIGNING", state=DISABLED, command=on_start_align)
-    align_btn.pack(side="left", padx=6)
+
 
     refresh_action_buttons()
 
