@@ -453,6 +453,5 @@ if __name__ == "__main__":
     parser.add_argument("--output_path", type=Path, required=True)
     parser.add_argument("--matcher", default="sequential", choices=["sequential", "exhaustive", "vocabtree", "spatial"])
     parser.add_argument("--export_rc_xmp", action="store_true", help="Write XMP sidecars for RealityCapture (xcr schema)")
-    run(parser.parse_args())
     parser.add_argument("--render_only", action="store_true", help="Only render images/masks; skip extraction/mapping")
     run(parser.parse_args())
