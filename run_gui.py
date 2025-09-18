@@ -989,9 +989,9 @@ def main():
 
     _root = TkinterDnD.Tk()
     _root.title("360 Video Dataset Preparation")
-    _root.geometry("780x720")
+    _root.geometry("1280x900")
     _root.configure(bg="black")
-    _root.resizable(False, False)
+    _root.resizable(True, True)
 
     # ---------- Header ----------
     header = Frame(_root, bg="black")
@@ -1118,3 +1118,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
