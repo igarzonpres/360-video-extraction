@@ -9,14 +9,15 @@ from pathlib import Path
 from typing import NamedTuple
 
 from tkinter import (
-    Label, Entry, StringVar, Frame, Checkbutton, BooleanVar,
-    filedialog, Button, Text, END, BOTH, DISABLED, NORMAL
+    Label, Entry, StringVar, DoubleVar, Frame, Checkbutton, BooleanVar,
+    filedialog, Button, Text, Scale, END, BOTH, DISABLED, NORMAL
 )
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from tkinter import ttk
 from PIL import Image, ImageTk
 
 import numpy as np  # NEW: for mask processing
+from typing import List, Tuple
 
 # =========================
 # Angle profiles & helpers
@@ -94,6 +95,15 @@ _last_folder = None
 _selected_project = None
 _split_result = None
 
+# =========================
+# Preview globals
+# =========================
+preview_time_var = None  # StringVar HH:MM:SS
+preview_grid = None      # Frame that holds 3x3 previews
+_preview_imgs = []       # keep PhotoImage refs
+_yaw_vars: List[DoubleVar] | None = None  # per-view yaw
+_pitch_vars: List[DoubleVar] | None = None  # per-view pitch
+
 def ui_status(msg: str):
     status_var.set(msg)
     _root.update_idletasks()
@@ -130,6 +140,179 @@ def ui_sub_progress(value: float | None = None, indeterminate: bool = False):
         progress_sub["mode"] = "determinate"
         progress_sub["value"] = 0 if value is None else value
     _root.update_idletasks()
+
+# =========================
+# Preview helpers
+# =========================
+
+def _default_pairs(masking_enabled: bool) -> List[Tuple[float, float]]:
+    if masking_enabled:
+        return [(float(a), float(b)) for a, b in MASKING_PITCH_YAW_PAIRS]
+    else:
+        return [(float(a), float(b)) for a, b in NO_MASKING_PITCH_YAW_PAIRS]
+
+
+def _ensure_preview_vars(reset_with_defaults: bool = False):
+    global preview_time_var, _yaw_vars, _pitch_vars
+    if preview_time_var is None:
+        preview_time_var = StringVar(value="00:00:10")
+    if _yaw_vars is None or _pitch_vars is None or reset_with_defaults:
+        pairs = _default_pairs(bool(use_masking.get())) if use_masking is not None else _default_pairs(False)
+        _yaw_vars = [DoubleVar(value=p[1]) for p in pairs]
+        _pitch_vars = [DoubleVar(value=p[0]) for p in pairs]
+
+
+def _current_pairs() -> List[Tuple[float, float]]:
+    # Return list[(pitch, yaw)] from sliders
+    global _yaw_vars, _pitch_vars
+    if _yaw_vars is None or _pitch_vars is None:
+        _ensure_preview_vars(reset_with_defaults=True)
+    return [(float(_pitch_vars[i].get()), float(_yaw_vars[i].get())) for i in range(9)]
+
+
+def _write_rotation_override_for_dir(root_dir: Path):
+    pairs = _current_pairs()
+    ref_idx = MASKING_REF_IDX if bool(use_masking.get()) else NO_MASKING_REF_IDX
+    write_rotation_override(root_dir, pairs, ref_idx)
+
+
+def _extract_preview_frame(video_path: Path, time_hms: str, out_file: Path) -> bool:
+    try:
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        # Try ffmpeg first
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", time_hms,
+            "-i", str(video_path),
+            "-frames:v", "1",
+            "-q:v", "2",
+            str(out_file),
+        ]
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if proc.returncode == 0 and out_file.exists():
+            return True
+    except Exception:
+        pass
+    # Fallback to OpenCV
+    try:
+        h, m, s = [int(x) for x in time_hms.split(":")]
+        seconds = h * 3600 + m * 60 + s
+    except Exception:
+        seconds = 10
+    cap = cv2.VideoCapture(str(video_path))
+    fps = float(cap.get(cv2.CAP_PROP_FPS)) or 30.0
+    frame_no = int(max(0, seconds * fps))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
+    ok, frame = cap.read()
+    cap.release()
+    if ok and frame is not None:
+        cv2.imwrite(str(out_file), frame)
+        return True
+    return False
+
+
+def _collect_preview_images(preview_out: Path) -> List[Path]:
+    images_root = preview_out / "images"
+    found: List[Path] = []
+    if not images_root.exists():
+        return found
+    # Expect images under pano_camera*/ subfolders; pick first image per view index 0..8
+    for idx in range(9):
+        sub = images_root / f"pano_camera{idx}"
+        if sub.exists():
+            imgs = sorted([p for p in sub.rglob("*.jpg")])
+            if imgs:
+                found.append(imgs[0])
+            else:
+                found.append(Path())
+        else:
+            found.append(Path())
+    return found
+
+
+def _refresh_preview_grid(preview_root: Path):
+    global preview_grid, _preview_imgs
+    if preview_grid is None:
+        return
+    # Clear previous widgets
+    for w in list(preview_grid.children.values()):
+        try:
+            w.destroy()
+        except Exception:
+            pass
+    _preview_imgs.clear()
+
+    out_dir = preview_root / "output"
+    imgs = _collect_preview_images(out_dir)
+    # Build 3x3 grid
+    for i, img_path in enumerate(imgs):
+        r, c = divmod(i, 3)
+        cell = Frame(preview_grid, bg="black")
+        cell.grid(row=r, column=c, padx=4, pady=4, sticky="n")
+        if img_path and img_path.exists():
+            try:
+                im = Image.open(img_path)
+                im.thumbnail((220, 220))
+                ph = ImageTk.PhotoImage(im)
+                lbl = Label(cell, image=ph, bg="black")
+                lbl.image = ph
+                _preview_imgs.append(ph)
+                lbl.pack()
+            except Exception:
+                Label(cell, text="(image error)", bg="black", fg="white").pack()
+        else:
+            Label(cell, text="(no image)", bg="black", fg="white").pack()
+        # Sliders
+        Label(cell, text=f"View {i}", bg="black", fg="#ccc").pack()
+        yaw = _yaw_vars[i]
+        pitch = _pitch_vars[i]
+        Scale(cell, from_=-180, to=180, orient="horizontal", length=200, label="Yaw", variable=yaw).pack()
+        Scale(cell, from_=-90, to=90, orient="horizontal", length=200, label="Pitch", variable=pitch).pack()
+
+
+def _on_compute_views():
+    if _selected_project is None:
+        ui_log("[ERROR] Please select a folder with a video first.")
+        return
+    project_root = Path(_selected_project)
+    videos = list_videos(project_root)
+    if not videos:
+        ui_log("[ERROR] No videos found in the selected folder.")
+        return
+    if len(videos) > 1:
+        # Let user pick which video
+        chosen = filedialog.askopenfilename(title="Select a video for preview", initialdir=str(project_root))
+        if not chosen:
+            return
+        video_path = Path(chosen)
+    else:
+        video_path = videos[0]
+
+    _ensure_preview_vars()
+    preview_root = project_root / "preview"
+    frame_file = preview_root / "frames" / "preview.jpg"
+
+    ui_status("Extracting preview frame…")
+    if not _extract_preview_frame(video_path, preview_time_var.get(), frame_file):
+        ui_log("[ERROR] Failed to extract preview frame. Ensure ffmpeg is installed or try another time.")
+        return
+
+    # Write override using current sliders
+    _write_rotation_override_for_dir(preview_root)
+
+    # Render-only in preview directory
+    ui_status("Rendering preview views…")
+    ui_sub_progress(indeterminate=True)
+    try:
+        run_ok = run_panorama_sfm(preview_root, render_only=True)
+    finally:
+        ui_sub_progress(0, indeterminate=False)
+    if not run_ok:
+        ui_log("[ERROR] Preview render failed.")
+        return
+
+    _refresh_preview_grid(preview_root)
+    ui_status("Preview updated.")
 
 
 def refresh_action_buttons():
@@ -579,7 +762,7 @@ def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enable
 
     if masking_enabled:
         ui_status("Writing rotation override (masking)...")
-        write_rotation_override(project_root, MASKING_PITCH_YAW_PAIRS, MASKING_REF_IDX)
+        write_rotation_override(project_root, _current_pairs(), MASKING_REF_IDX)
         ui_log(f"[OK] Wrote rotation_override.json (masking) in {project_root}")
 
         ui_status("Masking frames (fixed YOLO settings)...")
@@ -588,7 +771,7 @@ def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enable
             ui_log("[WARN] No frames were masked (or masking skipped due to error). Continuing...")
     else:
         ui_status("Writing rotation override (no masking)...")
-        write_rotation_override(project_root, NO_MASKING_PITCH_YAW_PAIRS, NO_MASKING_REF_IDX)
+        write_rotation_override(project_root, _current_pairs(), NO_MASKING_REF_IDX)
         ui_log(f"[OK] Wrote rotation_override.json (no masking) in {project_root}")
 
     ui_main_progress(33, indeterminate=False)
@@ -793,7 +976,10 @@ def on_start_align():
 
 
 def on_masking_toggle():
-    pass
+    try:
+        _ensure_preview_vars(reset_with_defaults=True)
+    except Exception:
+        pass
 
 
 def main():
@@ -902,6 +1088,19 @@ def main():
     log_text = Text(log_frame, height=12, bg="#111", fg="#ddd", insertbackground="white")
     log_text.pack(fill=BOTH, expand=True)
     log_text.configure(state=DISABLED)
+
+    # ---------- Preview Controls ----------
+    _ensure_preview_vars(reset_with_defaults=True)
+    prev_ctrl = Frame(_root, bg="black")
+    prev_ctrl.pack(fill=BOTH, padx=16, pady=(8, 6))
+    Label(prev_ctrl, text="Preview time (HH:MM:SS)", bg="black", fg="white").pack(side="left")
+    Entry(prev_ctrl, textvariable=preview_time_var, width=10).pack(side="left", padx=(6, 12))
+    Button(prev_ctrl, text="Compute views", command=_on_compute_views).pack(side="left")
+
+    # 3x3 preview grid
+    global preview_grid
+    preview_grid = Frame(_root, bg="black")
+    preview_grid.pack(fill=BOTH, padx=16, pady=(6, 12))
 
     # ---------- Stage Controls ----------
     stage_btns = Frame(_root, bg="black")
