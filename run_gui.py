@@ -10,14 +10,15 @@ from typing import NamedTuple
 
 from tkinter import (
     Label, Entry, StringVar, DoubleVar, Frame, Checkbutton, BooleanVar,
-    filedialog, Button, Text, Scale, Canvas, END, BOTH, DISABLED, NORMAL
+    filedialog, messagebox, Button, Text, Scale, Canvas, END, BOTH, DISABLED, NORMAL
 )
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from tkinter import ttk
 from PIL import Image, ImageTk
+from time_range import normalize_time_range
 
 import numpy as np  # NEW: for mask processing
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import shutil
 
 # =========================
@@ -43,12 +44,12 @@ NO_MASKING_PITCH_YAW_PAIRS = [
     (0, 90),   # Reference Pose (ref_idx = 0)
     (32, 0),
     (-42, 0),
-    (0, 33),  # hay que bajarlo de 42 
+    (0, 42),  # para la R1 usar 33, dejo el default para hacerlo compatible con la X5  
     (0, -25),
     (42, 180),
     (-32, 180),
     (0, 205),
-    (0, 142), # hay que subirlo de 138
+    (0, 138), # para la R1 subirlo (142) para evitar que salga el hombro, dejo el default para hacerlo compatible con la X5
 ]
 NO_MASKING_REF_IDX = 0
 
@@ -86,6 +87,8 @@ log_text = None
 
 use_masking = None
 frame_interval = None
+start_time_var = None
+end_time_var = None
 drop_zone = None
 browse_btn = None
 last_btn = None
@@ -367,7 +370,7 @@ def ui_disable_inputs(disabled=True):
 # Frame extraction with progress
 # =========================
 
-def extract_frames_with_progress(video_dir: Path, interval_seconds: float) -> int:
+def extract_frames_with_progress(video_dir: Path, interval_seconds: float, start_seconds: int, end_seconds: Optional[int]) -> int:
     """
     Extract frames from all videos directly inside video_dir into:
         video_dir/frames/
@@ -399,26 +402,50 @@ def extract_frames_with_progress(video_dir: Path, interval_seconds: float) -> in
             cap.release()
             continue
 
+        # Compute start/end frames for the requested range
+        max_frame_index = max(0, frame_count - 1)
+        start_frame = int(round(start_seconds * fps))
+        if start_frame > max_frame_index:
+            duration = frame_count / fps if fps else 0.0
+            ui_log(f"[WARN] Start time exceeds video length ({duration:.2f}s); skipping {video_file.name}.")
+            cap.release()
+            continue
+
+        end_frame = frame_count if end_seconds is None else min(int(round(end_seconds * fps)), frame_count)
+        if end_frame <= start_frame:
+            ui_log(f"[WARN] Provided time range produced no frames; skipping {video_file.name}.")
+            cap.release()
+            continue
+
+        # Seek to start
+        if start_frame > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
         step_frames = max(1, int(round(fps * float(interval_seconds))))
-        frame_idx = 0
+        frame_idx = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+        if frame_idx < start_frame:
+            frame_idx = start_frame
         saved_idx = 0
 
         ui_sub_progress(0, indeterminate=False)
         last_update = time.time()
+        total_range_frames = max(1, end_frame - start_frame)
 
         while cap.isOpened():
+            if frame_idx >= end_frame:
+                break
             ret, frame = cap.read()
             if not ret:
                 break
-            if frame_idx % step_frames == 0:
+            if (frame_idx - start_frame) % step_frames == 0:
                 frame_path = output_base_dir / f"{video_name}_frame_{saved_idx:05d}.jpg"
                 cv2.imwrite(str(frame_path), frame)
                 saved_idx += 1
 
             frame_idx += 1
 
-            if frame_count > 0 and (time.time() - last_update) > 0.05:
-                ui_sub_progress(min(100.0, 100.0 * frame_idx / max(1, frame_count)), indeterminate=False)
+            if (time.time() - last_update) > 0.05:
+                ui_sub_progress(min(100.0, 100.0 * (frame_idx - start_frame) / total_range_frames), indeterminate=False)
                 last_update = time.time()
 
         cap.release()
@@ -767,13 +794,15 @@ class SplitResult(NamedTuple):
     seconds_per_frame: float
     masking_enabled: bool
     video_count: int
+    start_seconds: int
+    end_seconds: Optional[int]
 
 
 
-def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enabled: bool) -> SplitResult:
+def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enabled: bool, start_seconds: int, end_seconds: Optional[int]) -> SplitResult:
     # ui_main_progress(0, indeterminate=False)
     ui_status("Preparing extraction...")
-    video_count = extract_frames_with_progress(project_root, seconds_per_frame)
+    video_count = extract_frames_with_progress(project_root, seconds_per_frame, start_seconds, end_seconds)
     frames_root = project_root / "frames"
 
     if masking_enabled:
@@ -802,6 +831,8 @@ def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enable
         seconds_per_frame=seconds_per_frame,
         masking_enabled=masking_enabled,
         video_count=video_count,
+        start_seconds=start_seconds,
+        end_seconds=end_seconds,
     )
 
 
@@ -838,7 +869,7 @@ def _stop_progress_bars():
 
 
 
-def _split_thread(project_root: Path, seconds_per_frame: float, masking_enabled: bool) -> None:
+def _split_thread(project_root: Path, seconds_per_frame: float, masking_enabled: bool, start_seconds: int, end_seconds: Optional[int]) -> None:
     global _split_result
     try:
     # remove preview folder before splitting
@@ -853,7 +884,8 @@ def _split_thread(project_root: Path, seconds_per_frame: float, masking_enabled:
         ui_disable_inputs(True)
         ui_sub_progress(0, indeterminate=False)
         _split_result = None
-        result = run_split_stage(project_root, seconds_per_frame, masking_enabled)
+        ui_log(f"[INFO] Splitting time range: {start_seconds:02d}s to {('end' if end_seconds is None else f'{end_seconds:02d}s')}")
+        result = run_split_stage(project_root, seconds_per_frame, masking_enabled, start_seconds, end_seconds)
         _split_result = result
         ui_status("Splitting complete. Ready for alignment.")
         ui_log("[OK] Splitting finished. Press START ALIGNING to continue.")
@@ -963,6 +995,19 @@ def on_start_split():
     seconds = _read_seconds_per_frame()
     masking = _read_masking_flag()
 
+    # Parse and validate time range from UI
+    try:
+        s_text = start_time_var.get() if start_time_var is not None else ""
+        e_text = end_time_var.get() if end_time_var is not None else ""
+        start_seconds, end_seconds = normalize_time_range(s_text, e_text)
+    except Exception as ex:
+        try:
+            messagebox.showwarning("Invalid time range", str(ex))
+        except Exception:
+            pass
+        ui_log(f"[ERROR] Invalid time range: {ex}")
+        return
+
     _split_result = None
     refresh_action_buttons()
 
@@ -973,7 +1018,7 @@ def on_start_split():
 
     threading.Thread(
         target=_split_thread,
-        args=(project_root, seconds, masking),
+        args=(project_root, seconds, masking, start_seconds, end_seconds),
         daemon=True
     ).start()
 
@@ -1009,7 +1054,7 @@ def on_masking_toggle():
 
 def main():
     global _root, status_var, progress_sub, log_text
-    global use_masking, frame_interval, drop_zone, browse_btn, last_btn, split_btn, align_btn
+    global use_masking, frame_interval, start_time_var, end_time_var, drop_zone, browse_btn, last_btn, split_btn, align_btn
     global export_rc_xmp
     global yolo_model_path, yolo_conf, yolo_dilate_px, yolo_invert_mask, yolo_apply_to_rgb, _yolo_widgets
 
@@ -1107,6 +1152,20 @@ def main():
 
     status_var = StringVar(value="Idle.")
     Label(_root, textvariable=status_var, bg="black", fg="white").pack(pady=(0, 6))
+
+    # ---------- Time Range ----------
+    range_frame = Frame(_root, bg="black")
+    range_frame.pack(pady=(6, 2))
+
+    start_lbl = Label(range_frame, text="Start (hh:mm:ss)", bg="black", fg="white")
+    start_lbl.pack(side="left", padx=(0, 6))
+    start_time_var = StringVar(value="")
+    Entry(range_frame, textvariable=start_time_var, width=10).pack(side="left", padx=(0, 16))
+
+    end_lbl = Label(range_frame, text="End (hh:mm:ss)", bg="black", fg="white")
+    end_lbl.pack(side="left", padx=(0, 6))
+    end_time_var = StringVar(value="")
+    Entry(range_frame, textvariable=end_time_var, width=10).pack(side="left")
 
     # ---------- Stage Controls ----------
     stage_btns = Frame(_root, bg="black")

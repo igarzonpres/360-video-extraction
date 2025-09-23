@@ -1,0 +1,44 @@
+﻿# Bytecode and caches
+__pycache__/
+*.py[cod]
+
+# IDE
+.vscode/
+
+# Large/binary artifacts not in Git
+*.pt
+*.pth
+*.bin
+*.onnx
+*.engine
+*.tflite
+*.ckpt
+*.npz
+*.npy
+*.h5
+*.zip
+*.7z
+*.tar
+*.gz
+*.bz2
+*.xz
+*.rar
+*.exe
+*.dll
+*.so
+
+# Media assets keep local
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tiff
+*.gif
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# Project-specific
+/yolov8x-seg.pt
+/proyecciones.png
