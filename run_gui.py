@@ -7,6 +7,7 @@ import threading
 import subprocess
 from pathlib import Path
 from typing import NamedTuple
+import math
 
 from tkinter import (
     Label, Entry, StringVar, DoubleVar, Frame, Checkbutton, BooleanVar,
@@ -111,6 +112,13 @@ _pitch_vars: List[DoubleVar] | None = None  # per-view pitch
 preview_canvas = None    # Canvas wrapper for scrollbars
 hscroll = None           # Horizontal scrollbar
 vscroll = None           # Vertical scrollbar
+
+# =========================
+# Overlay globals (Overlays tab)
+# =========================
+overlay_canvas = None
+_overlay_img_tk = None
+_overlay_items = []  # canvas item ids to clear
 
 def ui_status(msg: str):
     status_var.set(msg)
@@ -333,6 +341,176 @@ def _on_compute_views():
 
     _refresh_preview_grid(preview_root)
     ui_status("Preview updated.")
+
+
+# =========================
+# Overlay helpers (project 9 views onto panorama)
+# =========================
+
+def _dir_from_yaw_pitch(pitch_deg: float, yaw_deg: float) -> np.ndarray:
+    # 3D direction for given pitch (down positive) and yaw (right positive)
+    phi = math.radians(yaw_deg)
+    theta = math.radians(pitch_deg)
+    x = math.sin(phi) * math.cos(theta)
+    y = -math.sin(theta)
+    z = math.cos(phi) * math.cos(theta)
+    v = np.array([x, y, z], dtype=float)
+    n = np.linalg.norm(v) or 1.0
+    return v / n
+
+
+def _basis_from_center(pitch_deg: float, yaw_deg: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # Returns (forward d, right r, up u)
+    d = _dir_from_yaw_pitch(pitch_deg, yaw_deg)
+    up_world = np.array([0.0, 1.0, 0.0], dtype=float)
+    r = np.cross(up_world, d)
+    rn = np.linalg.norm(r)
+    if rn < 1e-6:
+        # Degenerate at poles; pick arbitrary right
+        r = np.array([1.0, 0.0, 0.0], dtype=float)
+    else:
+        r = r / rn
+    u = np.cross(d, r)
+    un = np.linalg.norm(u) or 1.0
+    u = u / un
+    return d, r, u
+
+
+def _yaw_pitch_from_vec(v: np.ndarray) -> tuple[float, float]:
+    # Returns (yaw_rad, pitch_rad)
+    x, y, z = float(v[0]), float(v[1]), float(v[2])
+    yaw = math.atan2(x, z)
+    pitch = -math.atan2(y, math.hypot(x, z))
+    return yaw, pitch
+
+
+def _poly_corners_pixels(pitch_deg: float, yaw_deg: float, fov_deg: float, W: int, H: int) -> list[tuple[float, float]]:
+    # Compute the 4 perspective frustum corners projected to equirect pixels
+    d, r, u = _basis_from_center(pitch_deg, yaw_deg)
+    t = math.tan(math.radians(fov_deg) / 2.0)
+    # Image corners in camera image plane: (x_img, y_img) in {-1, +1}
+    corners_xy = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
+    pts: list[tuple[float, float]] = []
+    for x_img, y_img in corners_xy:
+        # y_img positive is down; move along -u for down
+        dir_vec = d + x_img * t * r + (-y_img) * t * u
+        dir_vec = dir_vec / (np.linalg.norm(dir_vec) or 1.0)
+        yaw_rad, pitch_rad = _yaw_pitch_from_vec(dir_vec)
+        u_px = (yaw_rad + math.pi) / (2 * math.pi) * W
+        v_px = (1 - (pitch_rad * 2 / math.pi)) / 2 * H
+        pts.append((u_px, v_px))
+    return pts
+
+
+def _clear_overlay_canvas():
+    global _overlay_items
+    if overlay_canvas is None:
+        return
+    for item in _overlay_items:
+        try:
+            overlay_canvas.delete(item)
+        except Exception:
+            pass
+    _overlay_items = []
+
+
+def _draw_outline_with_seam(canvas: Canvas, pts: list[tuple[float, float]], W: int, scale: float, color: str, width: int):
+    # Draw edges with seam handling between consecutive points (+ closing edge)
+    def draw_seg(a, b):
+        ax, ay = a; bx, by = b
+        canvas_id = canvas.create_line(ax * scale, ay * scale, bx * scale, by * scale, fill=color, width=width)
+        _overlay_items.append(canvas_id)
+
+    n = len(pts)
+    for i in range(n):
+        u0, v0 = pts[i]
+        u1, v1 = pts[(i + 1) % n]
+        du = u1 - u0
+        if abs(du) <= W / 2:
+            draw_seg((u0, v0), (u1, v1))
+        else:
+            # Seam crossing
+            if du > 0:
+                # Cross at W
+                u1_un = u1 - W
+                t = (W - u0) / (u1_un - u0)
+                vc = v0 + t * (v1 - v0)
+                draw_seg((u0, v0), (W, vc))
+                draw_seg((0, vc), (u1, v1))
+            else:
+                # Cross at 0
+                u1_un = u1 + W
+                t = (0 - u0) / (u1_un - u0)
+                vc = v0 + t * (v1 - v0)
+                draw_seg((u0, v0), (0, vc))
+                draw_seg((W, vc), (u1, v1))
+
+
+def _draw_overlays_on_canvas(image_path: Path, pairs: List[Tuple[float, float]], ref_idx: int):
+    global _overlay_img_tk
+    try:
+        im = Image.open(image_path)
+    except Exception as e:
+        ui_log(f"[ERROR] Failed to load panorama: {e}")
+        return
+
+    W, H = im.size
+    # Scale image for display
+    max_w = 1100
+    disp_w = min(W, max_w)
+    disp_h = int(H * (disp_w / W))
+    im_disp = im.resize((disp_w, disp_h), Image.LANCZOS) if disp_w != W else im
+    _overlay_img_tk = ImageTk.PhotoImage(im_disp)
+
+    if overlay_canvas is None:
+        return
+    overlay_canvas.config(width=disp_w, height=disp_h)
+    _clear_overlay_canvas()
+    # Set background
+    bg_id = overlay_canvas.create_image(0, 0, anchor="nw", image=_overlay_img_tk)
+    _overlay_items.append(bg_id)
+
+    # Colors and widths
+    colors = ["#ff4d4d", "#4dff4d", "#4d4dff", "#ffd24d", "#4dd2ff", "#d24dff", "#ff884d", "#8cff4d", "#4dffd2"]
+    for i, (pitch_deg, yaw_deg) in enumerate(pairs):
+        poly = _poly_corners_pixels(pitch_deg, yaw_deg, 90.0, W, H)
+        color = colors[i % len(colors)]
+        w = 3 if i == ref_idx else 2
+        _draw_outline_with_seam(overlay_canvas, poly, W, scale=float(disp_w) / float(W), color=color, width=w)
+        # Optional label near first corner
+        u_lbl, v_lbl = poly[0]
+        txt_id = overlay_canvas.create_text(u_lbl * disp_w / W + 6, v_lbl * disp_w / W + 6, text=str(i), fill=color, anchor="nw")
+        _overlay_items.append(txt_id)
+
+
+def _on_refresh_overlays():
+    if _selected_project is None:
+        ui_log("[ERROR] Please select a folder with a video first.")
+        return
+    project_root = Path(_selected_project)
+    videos = list_videos(project_root)
+    if not videos:
+        ui_log("[ERROR] No videos found in the selected folder.")
+        return
+    if len(videos) > 1:
+        chosen = filedialog.askopenfilename(title="Select a video for overlay", initialdir=str(project_root))
+        if not chosen:
+            return
+        video_path = Path(chosen)
+    else:
+        video_path = videos[0]
+
+    preview_root = project_root / "preview"
+    frame_file = preview_root / "frames" / "preview.jpg"
+    ui_status("Extracting panorama frame for overlays…")
+    if not _extract_preview_frame(video_path, preview_time_var.get(), frame_file):
+        ui_log("[ERROR] Failed to extract panorama frame for overlays.")
+        return
+
+    # Use current yaw/pitch pairs and reference index depending on masking
+    pairs = _current_pairs()
+    ref_idx = MASKING_REF_IDX if bool(use_masking.get()) else NO_MASKING_REF_IDX
+    _draw_overlays_on_canvas(frame_file, pairs, ref_idx)
 
 
 def refresh_action_buttons():
@@ -1182,33 +1360,44 @@ def main():
     log_text.pack(fill=BOTH)
     log_text.configure(state=DISABLED)
 
-    # ---------- Preview Controls ----------
+    # ---------- Preview / Overlays Tabs ----------
     _ensure_preview_vars(reset_with_defaults=True)
-    prev_ctrl = Frame(_root, bg="black")
-    prev_ctrl.pack(fill=BOTH, padx=16, pady=(8, 6))
+    tabs = ttk.Notebook(_root)
+    tabs.pack(fill=BOTH, expand=True, padx=16, pady=(8, 6))
+
+    # Preview tab
+    preview_tab = Frame(tabs, bg="black")
+    tabs.add(preview_tab, text="Preview")
+
+    prev_ctrl = Frame(preview_tab, bg="black")
+    prev_ctrl.pack(fill=BOTH, pady=(4, 6))
     Label(prev_ctrl, text="Preview time (HH:MM:SS)", bg="black", fg="white").pack(side="left")
     Entry(prev_ctrl, textvariable=preview_time_var, width=10).pack(side="left", padx=(6, 12))
     Button(prev_ctrl, text="Compute views", command=_on_compute_views).pack(side="left")
 
     # 3x3 preview grid
     global preview_grid
-    preview_wrap = Frame(_root, bg="black")
-    preview_wrap.pack(fill=BOTH, padx=16, pady=(6, 12))
+    preview_wrap = Frame(preview_tab, bg="black")
+    preview_wrap.pack(fill=BOTH, pady=(6, 12))
     global preview_canvas
     preview_canvas = Canvas(preview_wrap, bg="black", highlightthickness=0, height=500)
-    # Allow both horizontal and vertical scrolling
     preview_canvas.pack(side="left", fill=BOTH, expand=True)
     global preview_grid, hscroll, vscroll
     preview_grid = Frame(preview_canvas, bg="black")
     preview_canvas.create_window((0, 0), window=preview_grid, anchor="nw")
-    # Scrollbars
-    # vscroll = ttk.Scrollbar(preview_wrap, orient="vertical", command=preview_canvas.yview)
-    # vscroll.pack(side="right", fill="y")
-    # hscroll = ttk.Scrollbar(preview_wrap, orient="horizontal", command=preview_canvas.xview)
-    # hscroll.pack(side="bottom", fill="x")
-    # preview_canvas.configure(xscrollcommand=hscroll.set, yscrollcommand=vscroll.set)
 
+    # Overlays tab
+    overlays_tab = Frame(tabs, bg="black")
+    tabs.add(overlays_tab, text="Overlays")
 
+    ov_ctrl = Frame(overlays_tab, bg="black")
+    ov_ctrl.pack(fill=BOTH, pady=(4, 6))
+    Label(ov_ctrl, text="Uses Preview time", bg="black", fg="#ccc").pack(side="left", padx=(0, 12))
+    Button(ov_ctrl, text="Refresh Overlays", command=_on_refresh_overlays).pack(side="left")
+
+    global overlay_canvas
+    overlay_canvas = Canvas(overlays_tab, bg="black", highlightthickness=0, height=520)
+    overlay_canvas.pack(fill=BOTH, expand=True, pady=(6, 12))
 
     refresh_action_buttons()
 
