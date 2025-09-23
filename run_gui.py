@@ -17,6 +17,7 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 from tkinter import ttk
 from PIL import Image, ImageTk
 from time_range import normalize_time_range
+from scipy.spatial.transform import Rotation
 
 import numpy as np  # NEW: for mask processing
 from typing import List, Tuple, Optional
@@ -384,22 +385,46 @@ def _yaw_pitch_from_vec(v: np.ndarray) -> tuple[float, float]:
     return yaw, pitch
 
 
-def _poly_corners_pixels(pitch_deg: float, yaw_deg: float, fov_deg: float, W: int, H: int) -> list[tuple[float, float]]:
-    # Compute the 4 perspective frustum corners projected to equirect pixels
-    d, r, u = _basis_from_center(pitch_deg, yaw_deg)
-    t = math.tan(math.radians(fov_deg) / 2.0)
-    # Image corners in camera image plane: (x_img, y_img) in {-1, +1}
-    corners_xy = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
-    pts: list[tuple[float, float]] = []
-    for x_img, y_img in corners_xy:
-        # y_img positive is down; move along -u for down
-        dir_vec = d + x_img * t * r + (-y_img) * t * u
-        dir_vec = dir_vec / (np.linalg.norm(dir_vec) or 1.0)
-        yaw_rad, pitch_rad = _yaw_pitch_from_vec(dir_vec)
-        u_px = (yaw_rad + math.pi) / (2 * math.pi) * W
-        v_px = (1 - (pitch_rad * 2 / math.pi)) / 2 * H
-        pts.append((u_px, v_px))
-    return pts
+def _virtual_cam_from_pano_height(pano_h: int, fov_deg: float) -> tuple[int, float, float, float]:
+    # Mirror panorama_sfm.create_virtual_camera
+    image_size = int(pano_h * fov_deg / 180.0)
+    focal = image_size / (2.0 * math.tan(math.radians(fov_deg) / 2.0))
+    cx = image_size / 2.0
+    cy = image_size / 2.0
+    return image_size, focal, cx, cy
+
+
+def _project_xy_list_to_pano_uv(
+    yaw_deg: float,
+    pitch_deg: float,
+    fov_deg: float,
+    pano_W: int,
+    pano_H: int,
+    x_list: list[float],
+    y_list: list[float],
+) -> list[tuple[float, float]]:
+    # Build virtual cam intrinsics
+    img_size, f, cx, cy = _virtual_cam_from_pano_height(pano_H, fov_deg)
+
+    # Normalized camera rays
+    x_arr = np.array(x_list, dtype=np.float64)
+    y_arr = np.array(y_list, dtype=np.float64)
+    x_norm = (x_arr - cx) / f
+    y_norm = (y_arr - cy) / f
+    rays_cam = np.stack([x_norm, y_norm, np.ones_like(x_norm)], axis=1)
+    rays_cam /= np.linalg.norm(rays_cam, axis=1, keepdims=True)
+
+    # Rotation: exact match to panorama_sfm (Rotation.from_euler("YX", [yaw, pitch]))
+    R = Rotation.from_euler("YX", [yaw_deg, pitch_deg], degrees=True).as_matrix()
+    rays_pano = rays_cam @ R
+
+    # Convert to equirect uv
+    x, y, z = rays_pano[:, 0], rays_pano[:, 1], rays_pano[:, 2]
+    yaw = np.arctan2(x, z)
+    pitch = -np.arctan2(y, np.hypot(x, z))
+    u = (1.0 + yaw / math.pi) / 2.0 * pano_W
+    v = (1.0 - (pitch * 2.0 / math.pi)) / 2.0 * pano_H
+    return list(zip(u.tolist(), v.tolist()))
 
 
 def _clear_overlay_canvas():
@@ -414,31 +439,29 @@ def _clear_overlay_canvas():
     _overlay_items = []
 
 
-def _draw_outline_with_seam(canvas: Canvas, pts: list[tuple[float, float]], W: int, scale: float, color: str, width: int):
-    # Draw edges with seam handling between consecutive points (+ closing edge)
+def _draw_polyline_with_seam(canvas: Canvas, pts: list[tuple[float, float]], W: int, scale: float, color: str, width: int):
+    # Draw polyline segments with seam handling; no closing edge
     def draw_seg(a, b):
         ax, ay = a; bx, by = b
         canvas_id = canvas.create_line(ax * scale, ay * scale, bx * scale, by * scale, fill=color, width=width)
         _overlay_items.append(canvas_id)
 
     n = len(pts)
-    for i in range(n):
+    for i in range(n - 1):
         u0, v0 = pts[i]
-        u1, v1 = pts[(i + 1) % n]
+        u1, v1 = pts[i + 1]
         du = u1 - u0
         if abs(du) <= W / 2:
             draw_seg((u0, v0), (u1, v1))
         else:
-            # Seam crossing
+            # Seam crossing; split into two segments
             if du > 0:
-                # Cross at W
                 u1_un = u1 - W
                 t = (W - u0) / (u1_un - u0)
                 vc = v0 + t * (v1 - v0)
                 draw_seg((u0, v0), (W, vc))
                 draw_seg((0, vc), (u1, v1))
             else:
-                # Cross at 0
                 u1_un = u1 + W
                 t = (0 - u0) / (u1_un - u0)
                 vc = v0 + t * (v1 - v0)
@@ -473,13 +496,36 @@ def _draw_overlays_on_canvas(image_path: Path, pairs: List[Tuple[float, float]],
     # Colors and widths
     colors = ["#ff4d4d", "#4dff4d", "#4d4dff", "#ffd24d", "#4dd2ff", "#d24dff", "#ff884d", "#8cff4d", "#4dffd2"]
     for i, (pitch_deg, yaw_deg) in enumerate(pairs):
-        poly = _poly_corners_pixels(pitch_deg, yaw_deg, 90.0, W, H)
         color = colors[i % len(colors)]
-        w = 3 if i == ref_idx else 2
-        _draw_outline_with_seam(overlay_canvas, poly, W, scale=float(disp_w) / float(W), color=color, width=w)
-        # Optional label near first corner
-        u_lbl, v_lbl = poly[0]
-        txt_id = overlay_canvas.create_text(u_lbl * disp_w / W + 6, v_lbl * disp_w / W + 6, text=str(i), fill=color, anchor="nw")
+        width_px = 3 if i == ref_idx else 2
+
+        # Build dense edge samples to match panorama_sfm remap (curved in equirect)
+        img_size, _, _, _ = _virtual_cam_from_pano_height(H, 90.0)
+        s = max(16, int(img_size / 24))  # number of samples per edge, proportional to view size
+        # corners in pixel center coordinates
+        x0, x1 = 0.5, img_size - 0.5
+        y0, y1 = 0.5, img_size - 0.5
+        xs = np.linspace(x0, x1, s).tolist()
+        ys = np.linspace(y0, y1, s).tolist()
+
+        # Top edge
+        pts_top = _project_xy_list_to_pano_uv(yaw_deg, pitch_deg, 90.0, W, H, xs, [y0] * s)
+        # Right edge
+        pts_right = _project_xy_list_to_pano_uv(yaw_deg, pitch_deg, 90.0, W, H, [x1] * s, ys)
+        # Bottom edge (reverse x to keep path order)
+        pts_bottom = _project_xy_list_to_pano_uv(yaw_deg, pitch_deg, 90.0, W, H, xs[::-1], [y1] * s)
+        # Left edge (reverse y)
+        pts_left = _project_xy_list_to_pano_uv(yaw_deg, pitch_deg, 90.0, W, H, [x0] * s, ys[::-1])
+
+        scale = float(disp_w) / float(W)
+        _draw_polyline_with_seam(overlay_canvas, pts_top, W, scale, color, width_px)
+        _draw_polyline_with_seam(overlay_canvas, pts_right, W, scale, color, width_px)
+        _draw_polyline_with_seam(overlay_canvas, pts_bottom, W, scale, color, width_px)
+        _draw_polyline_with_seam(overlay_canvas, pts_left, W, scale, color, width_px)
+
+        # Label at approximate center (midpoint of top edge)
+        u_lbl, v_lbl = pts_top[len(pts_top) // 2]
+        txt_id = overlay_canvas.create_text(u_lbl * scale + 6, v_lbl * scale + 6, text=str(i), fill=color, anchor="nw")
         _overlay_items.append(txt_id)
 
 
