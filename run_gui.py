@@ -479,7 +479,7 @@ def _draw_overlays_on_canvas(image_path: Path, pairs: List[Tuple[float, float]],
 
     W, H = im.size
     # Scale image for display
-    max_w = 1100
+    max_w = 700
     disp_w = min(W, max_w)
     disp_h = int(H * (disp_w / W))
     im_disp = im.resize((disp_w, disp_h), Image.LANCZOS) if disp_w != W else im
