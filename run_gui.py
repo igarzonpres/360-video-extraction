@@ -56,6 +56,23 @@ NO_MASKING_PITCH_YAW_PAIRS = [
 ]
 NO_MASKING_REF_IDX = 0
 
+# Inverted preset (no masking): user-requested alternative angles
+# Format: list of (pitch, yaw) in degrees
+INVERTED_NO_MASKING_PITCH_YAW_PAIRS = [
+    (0, -90),
+    (32, -180),
+    (-42, -180),
+    (0, -138),
+    (0, 155),
+    (42, 0),
+    (-32, 0),
+    (0, 0),
+    (0, -42),
+]
+
+# Toggle flag controlled by the GUI button
+inverted_preset_active = False
+
 VALID_VIDEO_EXT = {".mp4", ".mov", ".avi", ".mkv"}
 
 def write_rotation_override(root_dir: Path, pairs, ref_idx: int) -> Path:
@@ -164,10 +181,23 @@ def ui_sub_progress(value: float | None = None, indeterminate: bool = False):
 # =========================
 
 def _default_pairs(masking_enabled: bool) -> List[Tuple[float, float]]:
+    # Returns the initial preset used to seed sliders
+    # Respect the inverted toggle only for the non-masking profile
     if masking_enabled:
         return [(float(a), float(b)) for a, b in MASKING_PITCH_YAW_PAIRS]
     else:
-        return [(float(a), float(b)) for a, b in NO_MASKING_PITCH_YAW_PAIRS]
+        pairs = INVERTED_NO_MASKING_PITCH_YAW_PAIRS if inverted_preset_active else NO_MASKING_PITCH_YAW_PAIRS
+        return [(float(a), float(b)) for a, b in pairs]
+
+
+def _apply_pairs_to_vars(pairs: List[Tuple[float, float]]):
+    # Apply given (pitch, yaw) pairs to existing slider variables
+    global _yaw_vars, _pitch_vars
+    _ensure_preview_vars(reset_with_defaults=False)
+    for i in range(9):
+        p, y = pairs[i]
+        _pitch_vars[i].set(float(p))
+        _yaw_vars[i].set(float(y))
 
 
 def _ensure_preview_vars(reset_with_defaults: bool = False):
@@ -1299,6 +1329,21 @@ def on_masking_toggle():
         pass
 
 
+def _on_toggle_inverted_preset():
+    global inverted_preset_active
+    try:
+        inverted_preset_active = not inverted_preset_active
+        # Compute which pairs to apply based on masking flag and toggle
+        if bool(use_masking.get()):
+            pairs = _default_pairs(masking_enabled=True)
+        else:
+            pairs = _default_pairs(masking_enabled=False)
+        _apply_pairs_to_vars(pairs)
+        ui_status("Using inverted yaw preset." if inverted_preset_active else "Using default yaw preset.")
+    except Exception:
+        pass
+
+
 def main():
     global _root, status_var, progress_sub, log_text
     global use_masking, frame_interval, start_time_var, end_time_var, drop_zone, browse_btn, last_btn, split_btn, align_btn
@@ -1428,6 +1473,11 @@ def main():
     log_text = Text(log_frame, height=6, bg="#111", fg="#ddd", insertbackground="white")
     log_text.pack(fill=BOTH)
     log_text.configure(state=DISABLED)
+
+    # ---------- Preset Toggle (placed above Preview/Overlays) ----------
+    preset_ctrl = Frame(_root, bg="black")
+    preset_ctrl.pack(pady=(0, 6))
+    Button(preset_ctrl, text="Invert Yaw Values", command=_on_toggle_inverted_preset, **btn_style).pack(side="left")
 
     # ---------- Preview / Overlays Tabs ----------
     _ensure_preview_vars(reset_with_defaults=True)
