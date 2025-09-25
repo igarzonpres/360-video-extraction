@@ -22,6 +22,7 @@ from scipy.spatial.transform import Rotation
 import numpy as np  # NEW: for mask processing
 from typing import List, Tuple, Optional
 import shutil
+import json as _json
 
 # =========================
 # Angle profiles & helpers
@@ -454,19 +455,21 @@ def _draw_polyline_with_seam(canvas: Canvas, pts: list[tuple[float, float]], W: 
         if abs(du) <= W / 2:
             draw_seg((u0, v0), (u1, v1))
         else:
-            # Seam crossing; split into two segments
+            # Seam crossing; split into two segments using the correct border
             if du > 0:
+                # Cross left border at u=0 (wrap from left to right)
                 u1_un = u1 - W
-                t = (W - u0) / (u1_un - u0)
-                vc = v0 + t * (v1 - v0)
-                draw_seg((u0, v0), (W, vc))
-                draw_seg((0, vc), (u1, v1))
-            else:
-                u1_un = u1 + W
                 t = (0 - u0) / (u1_un - u0)
                 vc = v0 + t * (v1 - v0)
                 draw_seg((u0, v0), (0, vc))
                 draw_seg((W, vc), (u1, v1))
+            else:
+                # Cross right border at u=W (wrap from right to left)
+                u1_un = u1 + W
+                t = (W - u0) / (u1_un - u0)
+                vc = v0 + t * (v1 - v0)
+                draw_seg((u0, v0), (W, vc))
+                draw_seg((0, vc), (u1, v1))
 
 
 def _draw_overlays_on_canvas(image_path: Path, pairs: List[Tuple[float, float]], ref_idx: int):
@@ -553,9 +556,29 @@ def _on_refresh_overlays():
         ui_log("[ERROR] Failed to extract panorama frame for overlays.")
         return
 
-    # Use current yaw/pitch pairs and reference index depending on masking
-    pairs = _current_pairs()
-    ref_idx = MASKING_REF_IDX if bool(use_masking.get()) else NO_MASKING_REF_IDX
+    # Prefer using the same rotations used by the preview (if present)
+    # to ensure overlays match the preview exactly.
+    pairs: List[Tuple[float, float]]
+    ref_idx: int
+    override_path = preview_root / "rotation_override.json"
+    if override_path.exists():
+        try:
+            data = _json.loads(override_path.read_text(encoding="utf-8"))
+            raw_pairs = data.get("pitch_yaw_pairs", None)
+            if isinstance(raw_pairs, list) and len(raw_pairs) == 9:
+                pairs = [(float(a), float(b)) for (a, b) in raw_pairs]
+                ref_idx = int(data.get("ref_idx", 0))
+            else:
+                # Fallback to current sliders if file malformed
+                pairs = _current_pairs()
+                ref_idx = MASKING_REF_IDX if bool(use_masking.get()) else NO_MASKING_REF_IDX
+        except Exception:
+            pairs = _current_pairs()
+            ref_idx = MASKING_REF_IDX if bool(use_masking.get()) else NO_MASKING_REF_IDX
+    else:
+        # Fallback to current sliders
+        pairs = _current_pairs()
+        ref_idx = MASKING_REF_IDX if bool(use_masking.get()) else NO_MASKING_REF_IDX
     _draw_overlays_on_canvas(frame_file, pairs, ref_idx)
 
 
