@@ -1,0 +1,17 @@
+                   xcr:Version='2'
+                   xcr:DistortionModel='perspective'
+                   xcr:DistortionCoeficients='0 0 0 0 0 0'
+                   xcr:FocalLength35mm='{f35:.6f}'
+                   xcr:Skew='0'
+                   xcr:AspectRatio='1'
+                   xcr:PrincipalPointU='0'
+                   xcr:PrincipalPointV='0'
+                   xcr:InTexturing='1'
+                   xcr:InColoring='0'
+                   xcr:InMeshing='1'>
+   <xcr:Rotation>{rot_txt}</xcr:Rotation>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end='w'?>
+"""

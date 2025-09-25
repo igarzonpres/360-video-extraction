@@ -333,8 +333,8 @@ def render_perspective_images(
                 R_cam_from_world = cam_from_pano_r.T
                 write_rc_xmp_sidecar(image_path, R_cam_from_world, camera)
 
-            # Write new-style mask (*.mask.png)
-            mask_path = mask_dir / mask_rel
+            # Write new-style mask (*.mask.png) next to the image
+            mask_path = image_path.with_suffix('.mask.png')
             mask_path.parent.mkdir(exist_ok=True, parents=True)
             if not pycolmap.Bitmap.from_array(mask).write(mask_path):
                 raise RuntimeError(f"Cannot write {mask_path}")
