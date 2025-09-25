@@ -78,6 +78,20 @@ def open_in_explorer(path: Path) -> None:
 def list_videos(video_dir: Path):
     return sorted([p for p in video_dir.glob("*") if p.suffix.lower() in VALID_VIDEO_EXT])
 
+
+def frames_dir_has_frames(base_dir: Path) -> bool:
+    """Return True if <base_dir>/frames exists and contains at least one .jpg image."""
+    frames_root = base_dir / "frames"
+    try:
+        if not frames_root.exists() or not frames_root.is_dir():
+            return False
+        # Use rglob to accept any sub-structure, primarily expect flat
+        for _ in frames_root.rglob("*.jpg"):
+            return True
+        return False
+    except Exception:
+        return False
+
 # =========================
 # UI helpers (set from thread)
 # =========================
@@ -1049,8 +1063,17 @@ class SplitResult(NamedTuple):
 def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enabled: bool, start_seconds: int, end_seconds: Optional[int]) -> SplitResult:
     # ui_main_progress(0, indeterminate=False)
     ui_status("Preparing extraction...")
-    video_count = extract_frames_with_progress(project_root, seconds_per_frame, start_seconds, end_seconds)
+    # Count videos (ignores non-video items like 'frames/')
+    video_count = len(list_videos(project_root))
     frames_root = project_root / "frames"
+
+    # If frames already exist, reuse and skip extraction
+    if frames_dir_has_frames(project_root):
+        ui_log(f"[INFO] Detected existing frames in: {frames_root}. Skipping extraction.")
+    else:
+        if frames_root.exists() and frames_root.is_dir():
+            ui_log(f"[WARN] Found empty frames folder at {frames_root}; extracting frames anyway.")
+        video_count = extract_frames_with_progress(project_root, seconds_per_frame, start_seconds, end_seconds)
 
     if masking_enabled:
         ui_status("Writing rotation override (masking)...")
