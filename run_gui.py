@@ -7,6 +7,7 @@ import threading
 import subprocess
 from pathlib import Path
 from typing import NamedTuple
+import math
 
 from tkinter import (
     Label, Entry, StringVar, DoubleVar, Frame, Checkbutton, BooleanVar,
@@ -16,10 +17,12 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 from tkinter import ttk
 from PIL import Image, ImageTk
 from time_range import normalize_time_range
+from scipy.spatial.transform import Rotation
 
 import numpy as np  # NEW: for mask processing
 from typing import List, Tuple, Optional
 import shutil
+import json as _json
 
 # =========================
 # Angle profiles & helpers
@@ -111,6 +114,13 @@ _pitch_vars: List[DoubleVar] | None = None  # per-view pitch
 preview_canvas = None    # Canvas wrapper for scrollbars
 hscroll = None           # Horizontal scrollbar
 vscroll = None           # Vertical scrollbar
+
+# =========================
+# Overlay globals (Overlays tab)
+# =========================
+overlay_canvas = None
+_overlay_img_tk = None
+_overlay_items = []  # canvas item ids to clear
 
 def ui_status(msg: str):
     status_var.set(msg)
@@ -333,6 +343,243 @@ def _on_compute_views():
 
     _refresh_preview_grid(preview_root)
     ui_status("Preview updated.")
+
+
+# =========================
+# Overlay helpers (project 9 views onto panorama)
+# =========================
+
+def _dir_from_yaw_pitch(pitch_deg: float, yaw_deg: float) -> np.ndarray:
+    # 3D direction for given pitch (down positive) and yaw (right positive)
+    phi = math.radians(yaw_deg)
+    theta = math.radians(pitch_deg)
+    x = math.sin(phi) * math.cos(theta)
+    y = -math.sin(theta)
+    z = math.cos(phi) * math.cos(theta)
+    v = np.array([x, y, z], dtype=float)
+    n = np.linalg.norm(v) or 1.0
+    return v / n
+
+
+def _basis_from_center(pitch_deg: float, yaw_deg: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # Returns (forward d, right r, up u)
+    d = _dir_from_yaw_pitch(pitch_deg, yaw_deg)
+    up_world = np.array([0.0, 1.0, 0.0], dtype=float)
+    r = np.cross(up_world, d)
+    rn = np.linalg.norm(r)
+    if rn < 1e-6:
+        # Degenerate at poles; pick arbitrary right
+        r = np.array([1.0, 0.0, 0.0], dtype=float)
+    else:
+        r = r / rn
+    u = np.cross(d, r)
+    un = np.linalg.norm(u) or 1.0
+    u = u / un
+    return d, r, u
+
+
+def _yaw_pitch_from_vec(v: np.ndarray) -> tuple[float, float]:
+    # Returns (yaw_rad, pitch_rad)
+    x, y, z = float(v[0]), float(v[1]), float(v[2])
+    yaw = math.atan2(x, z)
+    pitch = -math.atan2(y, math.hypot(x, z))
+    return yaw, pitch
+
+
+def _virtual_cam_from_pano_height(pano_h: int, fov_deg: float) -> tuple[int, float, float, float]:
+    # Mirror panorama_sfm.create_virtual_camera
+    image_size = int(pano_h * fov_deg / 180.0)
+    focal = image_size / (2.0 * math.tan(math.radians(fov_deg) / 2.0))
+    cx = image_size / 2.0
+    cy = image_size / 2.0
+    return image_size, focal, cx, cy
+
+
+def _project_xy_list_to_pano_uv(
+    yaw_deg: float,
+    pitch_deg: float,
+    fov_deg: float,
+    pano_W: int,
+    pano_H: int,
+    x_list: list[float],
+    y_list: list[float],
+) -> list[tuple[float, float]]:
+    # Build virtual cam intrinsics
+    img_size, f, cx, cy = _virtual_cam_from_pano_height(pano_H, fov_deg)
+
+    # Normalized camera rays
+    x_arr = np.array(x_list, dtype=np.float64)
+    y_arr = np.array(y_list, dtype=np.float64)
+    x_norm = (x_arr - cx) / f
+    y_norm = (y_arr - cy) / f
+    rays_cam = np.stack([x_norm, y_norm, np.ones_like(x_norm)], axis=1)
+    rays_cam /= np.linalg.norm(rays_cam, axis=1, keepdims=True)
+
+    # Rotation: exact match to panorama_sfm (Rotation.from_euler("YX", [yaw, pitch]))
+    R = Rotation.from_euler("YX", [yaw_deg, pitch_deg], degrees=True).as_matrix()
+    rays_pano = rays_cam @ R
+
+    # Convert to equirect uv
+    x, y, z = rays_pano[:, 0], rays_pano[:, 1], rays_pano[:, 2]
+    yaw = np.arctan2(x, z)
+    pitch = -np.arctan2(y, np.hypot(x, z))
+    u = (1.0 + yaw / math.pi) / 2.0 * pano_W
+    v = (1.0 - (pitch * 2.0 / math.pi)) / 2.0 * pano_H
+    return list(zip(u.tolist(), v.tolist()))
+
+
+def _clear_overlay_canvas():
+    global _overlay_items
+    if overlay_canvas is None:
+        return
+    for item in _overlay_items:
+        try:
+            overlay_canvas.delete(item)
+        except Exception:
+            pass
+    _overlay_items = []
+
+
+def _draw_polyline_with_seam(canvas: Canvas, pts: list[tuple[float, float]], W: int, scale: float, color: str, width: int):
+    # Draw polyline segments with seam handling; no closing edge
+    def draw_seg(a, b):
+        ax, ay = a; bx, by = b
+        canvas_id = canvas.create_line(ax * scale, ay * scale, bx * scale, by * scale, fill=color, width=width)
+        _overlay_items.append(canvas_id)
+
+    n = len(pts)
+    for i in range(n - 1):
+        u0, v0 = pts[i]
+        u1, v1 = pts[i + 1]
+        du = u1 - u0
+        if abs(du) <= W / 2:
+            draw_seg((u0, v0), (u1, v1))
+        else:
+            # Seam crossing; split into two segments using the correct border
+            if du > 0:
+                # Cross left border at u=0 (wrap from left to right)
+                u1_un = u1 - W
+                t = (0 - u0) / (u1_un - u0)
+                vc = v0 + t * (v1 - v0)
+                draw_seg((u0, v0), (0, vc))
+                draw_seg((W, vc), (u1, v1))
+            else:
+                # Cross right border at u=W (wrap from right to left)
+                u1_un = u1 + W
+                t = (W - u0) / (u1_un - u0)
+                vc = v0 + t * (v1 - v0)
+                draw_seg((u0, v0), (W, vc))
+                draw_seg((0, vc), (u1, v1))
+
+
+def _draw_overlays_on_canvas(image_path: Path, pairs: List[Tuple[float, float]], ref_idx: int):
+    global _overlay_img_tk
+    try:
+        im = Image.open(image_path)
+    except Exception as e:
+        ui_log(f"[ERROR] Failed to load panorama: {e}")
+        return
+
+    W, H = im.size
+    # Scale image for display
+    max_w = 700
+    disp_w = min(W, max_w)
+    disp_h = int(H * (disp_w / W))
+    im_disp = im.resize((disp_w, disp_h), Image.LANCZOS) if disp_w != W else im
+    _overlay_img_tk = ImageTk.PhotoImage(im_disp)
+
+    if overlay_canvas is None:
+        return
+    overlay_canvas.config(width=disp_w, height=disp_h)
+    _clear_overlay_canvas()
+    # Set background
+    bg_id = overlay_canvas.create_image(0, 0, anchor="nw", image=_overlay_img_tk)
+    _overlay_items.append(bg_id)
+
+    # Colors and widths
+    colors = ["#ff4d4d", "#4dff4d", "#4d4dff", "#ffd24d", "#4dd2ff", "#d24dff", "#ff884d", "#8cff4d", "#4dffd2"]
+    for i, (pitch_deg, yaw_deg) in enumerate(pairs):
+        color = colors[i % len(colors)]
+        width_px = 3 if i == ref_idx else 2
+
+        # Build dense edge samples to match panorama_sfm remap (curved in equirect)
+        img_size, _, _, _ = _virtual_cam_from_pano_height(H, 90.0)
+        s = max(16, int(img_size / 24))  # number of samples per edge, proportional to view size
+        # corners in pixel center coordinates
+        x0, x1 = 0.5, img_size - 0.5
+        y0, y1 = 0.5, img_size - 0.5
+        xs = np.linspace(x0, x1, s).tolist()
+        ys = np.linspace(y0, y1, s).tolist()
+
+        # Top edge
+        pts_top = _project_xy_list_to_pano_uv(yaw_deg, pitch_deg, 90.0, W, H, xs, [y0] * s)
+        # Right edge
+        pts_right = _project_xy_list_to_pano_uv(yaw_deg, pitch_deg, 90.0, W, H, [x1] * s, ys)
+        # Bottom edge (reverse x to keep path order)
+        pts_bottom = _project_xy_list_to_pano_uv(yaw_deg, pitch_deg, 90.0, W, H, xs[::-1], [y1] * s)
+        # Left edge (reverse y)
+        pts_left = _project_xy_list_to_pano_uv(yaw_deg, pitch_deg, 90.0, W, H, [x0] * s, ys[::-1])
+
+        scale = float(disp_w) / float(W)
+        _draw_polyline_with_seam(overlay_canvas, pts_top, W, scale, color, width_px)
+        _draw_polyline_with_seam(overlay_canvas, pts_right, W, scale, color, width_px)
+        _draw_polyline_with_seam(overlay_canvas, pts_bottom, W, scale, color, width_px)
+        _draw_polyline_with_seam(overlay_canvas, pts_left, W, scale, color, width_px)
+
+        # Label at approximate center (midpoint of top edge)
+        u_lbl, v_lbl = pts_top[len(pts_top) // 2]
+        txt_id = overlay_canvas.create_text(u_lbl * scale + 6, v_lbl * scale + 6, text=str(i), fill=color, anchor="nw")
+        _overlay_items.append(txt_id)
+
+
+def _on_refresh_overlays():
+    if _selected_project is None:
+        ui_log("[ERROR] Please select a folder with a video first.")
+        return
+    project_root = Path(_selected_project)
+    videos = list_videos(project_root)
+    if not videos:
+        ui_log("[ERROR] No videos found in the selected folder.")
+        return
+    if len(videos) > 1:
+        chosen = filedialog.askopenfilename(title="Select a video for overlay", initialdir=str(project_root))
+        if not chosen:
+            return
+        video_path = Path(chosen)
+    else:
+        video_path = videos[0]
+
+    preview_root = project_root / "preview"
+    frame_file = preview_root / "frames" / "preview.jpg"
+    ui_status("Extracting panorama frame for overlays…")
+    if not _extract_preview_frame(video_path, preview_time_var.get(), frame_file):
+        ui_log("[ERROR] Failed to extract panorama frame for overlays.")
+        return
+
+    # Prefer using the same rotations used by the preview (if present)
+    # to ensure overlays match the preview exactly.
+    pairs: List[Tuple[float, float]]
+    ref_idx: int
+    override_path = preview_root / "rotation_override.json"
+    if override_path.exists():
+        try:
+            data = _json.loads(override_path.read_text(encoding="utf-8"))
+            raw_pairs = data.get("pitch_yaw_pairs", None)
+            if isinstance(raw_pairs, list) and len(raw_pairs) == 9:
+                pairs = [(float(a), float(b)) for (a, b) in raw_pairs]
+                ref_idx = int(data.get("ref_idx", 0))
+            else:
+                # Fallback to current sliders if file malformed
+                pairs = _current_pairs()
+                ref_idx = MASKING_REF_IDX if bool(use_masking.get()) else NO_MASKING_REF_IDX
+        except Exception:
+            pairs = _current_pairs()
+            ref_idx = MASKING_REF_IDX if bool(use_masking.get()) else NO_MASKING_REF_IDX
+    else:
+        # Fallback to current sliders
+        pairs = _current_pairs()
+        ref_idx = MASKING_REF_IDX if bool(use_masking.get()) else NO_MASKING_REF_IDX
+    _draw_overlays_on_canvas(frame_file, pairs, ref_idx)
 
 
 def refresh_action_buttons():
@@ -1182,33 +1429,44 @@ def main():
     log_text.pack(fill=BOTH)
     log_text.configure(state=DISABLED)
 
-    # ---------- Preview Controls ----------
+    # ---------- Preview / Overlays Tabs ----------
     _ensure_preview_vars(reset_with_defaults=True)
-    prev_ctrl = Frame(_root, bg="black")
-    prev_ctrl.pack(fill=BOTH, padx=16, pady=(8, 6))
+    tabs = ttk.Notebook(_root)
+    tabs.pack(fill=BOTH, expand=True, padx=16, pady=(8, 6))
+
+    # Preview tab
+    preview_tab = Frame(tabs, bg="black")
+    tabs.add(preview_tab, text="Preview")
+
+    prev_ctrl = Frame(preview_tab, bg="black")
+    prev_ctrl.pack(fill=BOTH, pady=(4, 6))
     Label(prev_ctrl, text="Preview time (HH:MM:SS)", bg="black", fg="white").pack(side="left")
     Entry(prev_ctrl, textvariable=preview_time_var, width=10).pack(side="left", padx=(6, 12))
     Button(prev_ctrl, text="Compute views", command=_on_compute_views).pack(side="left")
 
     # 3x3 preview grid
     global preview_grid
-    preview_wrap = Frame(_root, bg="black")
-    preview_wrap.pack(fill=BOTH, padx=16, pady=(6, 12))
+    preview_wrap = Frame(preview_tab, bg="black")
+    preview_wrap.pack(fill=BOTH, pady=(6, 12))
     global preview_canvas
     preview_canvas = Canvas(preview_wrap, bg="black", highlightthickness=0, height=500)
-    # Allow both horizontal and vertical scrolling
     preview_canvas.pack(side="left", fill=BOTH, expand=True)
     global preview_grid, hscroll, vscroll
     preview_grid = Frame(preview_canvas, bg="black")
     preview_canvas.create_window((0, 0), window=preview_grid, anchor="nw")
-    # Scrollbars
-    # vscroll = ttk.Scrollbar(preview_wrap, orient="vertical", command=preview_canvas.yview)
-    # vscroll.pack(side="right", fill="y")
-    # hscroll = ttk.Scrollbar(preview_wrap, orient="horizontal", command=preview_canvas.xview)
-    # hscroll.pack(side="bottom", fill="x")
-    # preview_canvas.configure(xscrollcommand=hscroll.set, yscrollcommand=vscroll.set)
 
+    # Overlays tab
+    overlays_tab = Frame(tabs, bg="black")
+    tabs.add(overlays_tab, text="Overlays")
 
+    ov_ctrl = Frame(overlays_tab, bg="black")
+    ov_ctrl.pack(fill=BOTH, pady=(4, 6))
+    Label(ov_ctrl, text="Uses Preview time", bg="black", fg="#ccc").pack(side="left", padx=(0, 12))
+    Button(ov_ctrl, text="Refresh Overlays", command=_on_refresh_overlays).pack(side="left")
+
+    global overlay_canvas
+    overlay_canvas = Canvas(overlays_tab, bg="black", highlightthickness=0, height=520)
+    overlay_canvas.pack(fill=BOTH, expand=True, pady=(6, 12))
 
     refresh_action_buttons()
 
