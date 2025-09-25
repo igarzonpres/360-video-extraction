@@ -18,6 +18,56 @@ from tqdm import tqdm
 import pycolmap
 from pycolmap import logging
 import json
+import uuid
+
+# Fixed GUID for multi-camera rig (hardware) and namespace for RigInstance generation
+RIG_GUID = uuid.UUID("8d3f3a2b-6b7c-4a2e-9c5d-2ecb3c6df7b1")
+RIGINSTANCE_NS = uuid.UUID("7f8a9b6e-1c2d-4e5f-8a9b-6e1c2d4e5f8a")
+
+
+def write_rc_xmp_minimal(
+    image_path: Path,
+    R_cam_from_world: np.ndarray,
+    *,
+    rig_guid: uuid.UUID,
+    rig_instance_guid: uuid.UUID,
+    rig_pose_index: int,
+    position_xyz: str = "0 0 0",
+    pose_prior: str = "exact",
+) -> None:
+    """Write a minimal RC XMP with Rig metadata, Position, Rotation.
+    - xcr:Version = 3
+    - PosePrior = exact (no Coordinates attribute)
+    - Rotation is 9 floats row-major, orthonormalized (det≈+1)
+    - Position is 3 floats
+    """
+    # Orthonormalize rotation (ensure proper rotation matrix)
+    R = np.asarray(R_cam_from_world, dtype=float).reshape(3, 3)
+    try:
+        U, _, Vt = np.linalg.svd(R)
+        R_ortho = U @ Vt
+        if np.linalg.det(R_ortho) < 0:
+            U[:, -1] *= -1
+            R_ortho = U @ Vt
+    except Exception:
+        R_ortho = R
+    rot_txt = " ".join(f"{v:.15g}" for v in R_ortho.flatten(order="C"))
+    pos_txt = position_xyz
+
+    xmp = f"""
+<x:xmpmeta xmlns:x='adobe:ns:meta/'>
+ <rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>
+  <rdf:Description xmlns:xcr='http://www.capturingreality.com/ns/xcr/1.1#' xcr:Version='3' xcr:PosePrior='{pose_prior}'>
+   <xcr:Rig>{rig_guid}</xcr:Rig>
+   <xcr:RigInstance>{rig_instance_guid}</xcr:RigInstance>
+   <xcr:RigPoseIndex>{rig_pose_index}</xcr:RigPoseIndex>
+   <xcr:Position>{pos_txt}</xcr:Position>
+   <xcr:Rotation>{rot_txt}</xcr:Rotation>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+"""
+    image_path.with_suffix('.xmp').write_text(xmp, encoding='utf-8')
 
 def load_rotation_override_if_any(input_image_path: Path | None):
     """
@@ -196,7 +246,18 @@ def render_perspective_images(
 
     rig_config = create_pano_rig_config(cams_from_pano_rotation, ref_idx=ref_idx)
 
-    def write_rc_xmp_sidecar(image_path: Path, R_cam_from_world: np.ndarray, camera: pycolmap.Camera):
+    def write_rc_xmp_sidecar(
+        image_path: Path,
+        R_cam_from_world: np.ndarray,
+        camera: pycolmap.Camera,
+        *,
+        rig_guid: uuid.UUID,
+        rig_instance_guid: uuid.UUID,
+        rig_pose_index: int,
+        position_xyz: str,
+        pose_prior: str = "exact",
+        coordinates: str = "absolute",
+    ):
         """
         Write an XMP sidecar in Capturing Reality 'xcr' schema.
         - Rotation: 3x3 row-major world->camera
@@ -236,7 +297,13 @@ def render_perspective_images(
                    xcr:PrincipalPointV='0'
                    xcr:InTexturing='1'
                    xcr:InColoring='0'
-                   xcr:InMeshing='1'>
+                   xcr:InMeshing='1'
+                   xcr:Coordinates='{coordinates}'
+                   xcr:PosePrior='{pose_prior}'>
+   <xcr:Rig>{rig_guid}</xcr:Rig>
+   <xcr:RigInstance>{rig_instance_guid}</xcr:RigInstance>
+   <xcr:RigPoseIndex>{rig_pose_index}</xcr:RigPoseIndex>
+   <xcr:Position>{pos_txt}</xcr:Position>
    <xcr:Rotation>{rot_txt}</xcr:Rotation>
   </rdf:Description>
  </rdf:RDF>
@@ -245,7 +312,7 @@ def render_perspective_images(
 """
         image_path.with_suffix('.xmp').write_text(xmp, encoding='utf-8')
         try:
-            logging.info(f"[XMP] wrote {image_path.with_suffix('.xmp')} (rotation prior only; pose/calibration not locked; no position)")
+            logging.info(f"[XMP] wrote {image_path.with_suffix('.xmp')} (rig+instance+pose index; PosePrior={pose_prior})")
         except Exception:
             pass
 
@@ -331,7 +398,20 @@ def render_perspective_images(
                 # Our matrix cam_from_pano_r maps camera->world for the row-vector usage above,
                 # so we transpose it for XMP.
                 R_cam_from_world = cam_from_pano_r.T
-                write_rc_xmp_sidecar(image_path, R_cam_from_world, camera)
+                # Derive per-pano rig instance GUID deterministically; fixed rig GUID
+                try:
+                    rig_instance_guid = uuid.uuid5(RIGINSTANCE_NS, str(pano_name))
+                except Exception:
+                    rig_instance_guid = uuid.uuid4()
+                write_rc_xmp_minimal(
+                    image_path,
+                    R_cam_from_world,
+                    rig_guid=RIG_GUID,
+                    rig_instance_guid=rig_instance_guid,
+                    rig_pose_index=int(cam_idx),
+                    position_xyz="0 0 0",
+                    pose_prior="exact",
+                )
 
             # Write new-style mask (*.mask.png)
             mask_path = mask_dir / mask_rel
