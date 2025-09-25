@@ -122,6 +122,219 @@ overlay_canvas = None
 _overlay_img_tk = None
 _overlay_items = []  # canvas item ids to clear
 
+# =========================
+# Masking (seam) globals
+# =========================
+mask_canvas = None
+_mask_img_tk = None
+_seam_points_x: list[int] = []  # panorama pixel X positions, up to 4 (2 rectangles)
+_mask_preview_items = []  # canvas items to clear
+
+
+def _mask_clear_canvas():
+    global _mask_preview_items
+    if mask_canvas is None:
+        return
+    for item in _mask_preview_items:
+        try:
+            mask_canvas.delete(item)
+        except Exception:
+            pass
+    _mask_preview_items = []
+
+
+def _mask_draw_image(img: Image.Image):
+    global _mask_img_tk
+    if mask_canvas is None:
+        return
+    W, H = img.size
+    max_w = 700
+    disp_w = min(W, max_w)
+    disp_h = int(H * (disp_w / W))
+    im_disp = img.resize((disp_w, disp_h), Image.LANCZOS) if disp_w != W else img
+    _mask_img_tk = ImageTk.PhotoImage(im_disp)
+    mask_canvas.config(width=disp_w, height=disp_h)
+    _mask_clear_canvas()
+    bg_id = mask_canvas.create_image(0, 0, anchor="nw", image=_mask_img_tk)
+    _mask_preview_items = [bg_id]
+
+
+def _mask_clear_overlays_only():
+    # Keep background image (first item), remove subsequent overlay items
+    global _mask_preview_items
+    if mask_canvas is None:
+        return
+    if not _mask_preview_items:
+        return
+    # Preserve first (bg) id
+    bg_id = _mask_preview_items[0]
+    for item in _mask_preview_items[1:]:
+        try:
+            mask_canvas.delete(item)
+        except Exception:
+            pass
+    _mask_preview_items = [bg_id]
+
+
+def _mask_draw_points_and_rects(preview_path: Path):
+    if mask_canvas is None:
+        return
+    try:
+        im = Image.open(preview_path)
+        W, H = im.size
+        # Determine displayed size from current PhotoImage when available
+        try:
+            disp_w = int(_mask_img_tk.width()) if _mask_img_tk is not None else W
+            disp_h = int(_mask_img_tk.height()) if _mask_img_tk is not None else H
+        except Exception:
+            disp_w = mask_canvas.winfo_width() or W
+            disp_h = mask_canvas.winfo_height() or H
+        scale = float(disp_w) / float(W) if W else 1.0
+        _mask_clear_overlays_only()
+        # Draw vertical lines for each point
+        for x in _seam_points_x:
+            cx = int(x * scale)
+            line_id = mask_canvas.create_line(cx, 0, cx, disp_h, fill="#ff4444", width=2)
+            _mask_preview_items.append(line_id)
+        # Draw rectangle outline for each completed pair
+        for i in range(0, len(_seam_points_x) // 2):
+            x0 = _seam_points_x[2 * i]
+            x1 = _seam_points_x[2 * i + 1]
+            lo, hi = (x0, x1) if x0 <= x1 else (x1, x0)
+            rx0 = int(lo * scale)
+            rx1 = int(hi * scale)
+            rect_id = mask_canvas.create_rectangle(rx0, 0, rx1, disp_h, outline="#ff4444", width=1, dash=(4, 2))
+            _mask_preview_items.append(rect_id)
+    except Exception:
+        pass
+
+
+def _on_mask_canvas_click(event):
+    # Map click x to panorama x using current displayed image size
+    try:
+        if _selected_project is None:
+            ui_log("[ERROR] Please select a folder first.")
+            return
+        preview_path = _ensure_preview_pano_frame(Path(_selected_project))
+        if preview_path is None:
+            return
+        im = Image.open(preview_path)
+        W, H = im.size
+        # Determine displayed image width from current PhotoImage
+        if _mask_img_tk is None:
+            _mask_draw_image(im)
+        try:
+            disp_w = int(_mask_img_tk.width()) if _mask_img_tk is not None else min(W, 700)
+        except Exception:
+            disp_w = min(W, 700)
+        # Clamp click within displayed image bounds and map to panorama x
+        x_disp = max(0, min(int(event.x), int(disp_w) - 1))
+        scale = float(W) / float(disp_w) if disp_w else 1.0
+        x_pano = int(x_disp * scale)
+        if len(_seam_points_x) >= 4:
+            ui_log("[WARN] Already have 4 points (2 rectangles). Use Clear to remove.")
+            return
+        x_pano = max(0, min(W - 1, x_pano))
+        # Enforce left->right order within each pair; if second < first, swap
+        if len(_seam_points_x) % 2 == 1:
+            prev = _seam_points_x[-1]
+            if x_pano < prev:
+                _seam_points_x[-1], x_pano = x_pano, prev
+        _seam_points_x.append(x_pano)
+        ui_status(f"Seam points: {_seam_points_x}")
+        # Ensure base image is drawn and overlay indicators are updated
+        _mask_draw_image(im)
+        _mask_draw_points_and_rects(preview_path)
+    except Exception as e:
+        ui_log(f"[WARN] Failed to record point: {e}")
+
+
+def _on_clear_last_seam_point():
+    if _seam_points_x:
+        _seam_points_x.pop()
+        ui_status(f"Seam points: {_seam_points_x}")
+    else:
+        ui_status("No points to clear.")
+    # Redraw markers over current preview if available
+    try:
+        if _selected_project is not None:
+            preview_path = _ensure_preview_pano_frame(Path(_selected_project))
+            if preview_path is not None:
+                _mask_draw_image(Image.open(preview_path))
+                _mask_draw_points_and_rects(preview_path)
+    except Exception:
+        pass
+
+
+def _on_preview_seam_mask():
+    if _selected_project is None:
+        ui_log("[ERROR] Please select a folder first.")
+        return
+    frame_file = _ensure_preview_pano_frame(Path(_selected_project))
+    if frame_file is None:
+        return
+    try:
+        im = Image.open(frame_file).convert("RGB")
+        W, H = im.size
+        # Save binary panorama seam mask for visibility in preview folder
+        mask = _build_pano_seam_mask(W, H, _seam_points_x)
+        out_bin = Path(_selected_project) / "preview" / "pano_seam_mask.png"
+        out_bin.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(mask).save(out_bin)
+
+        # Build visual overlay (semi-transparent black regions)
+        overlay = im.copy()
+        import numpy as _np
+        arr = _np.array(overlay, dtype=_np.uint8)
+        dark = arr.copy()
+        dark[..., :] = (dark * 0.4).astype(_np.uint8)
+        # Expand mask to 3 channels
+        m3 = _np.stack([mask == 0] * 3, axis=-1)
+        arr[m3] = dark[m3]
+        vis = Image.fromarray(arr)
+        _mask_draw_image(vis)
+        _mask_draw_points_and_rects(frame_file)
+        ui_status("Mask preview updated.")
+    except Exception as e:
+        ui_log(f"[ERROR] Failed to preview mask: {e}")
+
+
+def _on_create_seam_masks_now():
+    if _selected_project is None:
+        ui_log("[ERROR] Please select a folder first.")
+        return
+    try:
+        project_root = Path(_selected_project)
+        # If no points, guide user explicitly
+        if len(_seam_points_x) < 2:
+            ui_log("[INFO] Define at least two points (left, right) before creating masks.")
+            return
+
+        # If outputs are missing, still write the panorama seam mask so it is saved
+        out_images_root = project_root / "output" / "images"
+        if not out_images_root.exists():
+            # Ensure a preview exists and write pano mask for later
+            frame_file = _ensure_preview_pano_frame(project_root)
+            if frame_file is not None:
+                try:
+                    im = Image.open(frame_file)
+                    W, H = im.size
+                except Exception:
+                    W = H = 0
+                if W > 0 and H > 0:
+                    mask = _build_pano_seam_mask(W, H, _seam_points_x)
+                    out_bin = project_root / "preview" / "pano_seam_mask.png"
+                    out_bin.parent.mkdir(parents=True, exist_ok=True)
+                    Image.fromarray(mask).save(out_bin)
+            ui_log("[INFO] Rendered images not found yet. Run START SPLITTING to generate per-image RS seam masks. Panorama mask saved to preview.")
+            return
+
+        count = _generate_and_write_rs_seam_masks(project_root)
+        if count == 0:
+            ui_log("[INFO] No RS seam masks created. Ensure images exist under output/images and try again.")
+    except Exception as e:
+        ui_log(f"[ERROR] Failed to create RS seam masks: {e}")
+
 def ui_status(msg: str):
     status_var.set(msg)
     _root.update_idletasks()
@@ -529,7 +742,7 @@ def _draw_overlays_on_canvas(image_path: Path, pairs: List[Tuple[float, float]],
         # Label at approximate center (midpoint of top edge)
         u_lbl, v_lbl = pts_top[len(pts_top) // 2]
         txt_id = overlay_canvas.create_text(u_lbl * scale + 6, v_lbl * scale + 6, text=str(i), fill=color, anchor="nw")
-        _overlay_items.append(txt_id)
+    _overlay_items.append(txt_id)
 
 
 def _on_refresh_overlays():
@@ -934,6 +1147,115 @@ def run_yolo_masking(frames_root: Path) -> int:  # type: ignore[override]
     ui_sub_progress(100.0, indeterminate=False)
     ui_log(f"[OK] Wrote {processed}/{total} masks to {masks_dir}")
     return processed
+
+
+# =========================
+# Seam masking helpers (panorama -> per-view RS masks)
+# =========================
+
+def _ensure_preview_pano_frame(project_root: Path) -> Path | None:
+    videos = list_videos(project_root)
+    if not videos:
+        ui_log("[ERROR] No videos found in the selected folder.")
+        return None
+    if len(videos) > 1:
+        chosen = filedialog.askopenfilename(title="Select a video for mask preview", initialdir=str(project_root))
+        if not chosen:
+            return None
+        video_path = Path(chosen)
+    else:
+        video_path = videos[0]
+
+    preview_root = project_root / "preview"
+    frame_file = preview_root / "frames" / "preview.jpg"
+    ui_status("Extracting panorama frame for masking preview.")
+    ok = _extract_preview_frame(video_path, preview_time_var.get(), frame_file)
+    if not ok:
+        ui_log("[ERROR] Failed to extract panorama frame for masking preview.")
+        return None
+    return frame_file
+
+
+def _build_pano_seam_mask(width: int, height: int, points_x: list[int]) -> np.ndarray:
+    mask = np.full((height, width), 255, dtype=np.uint8)
+    pts = points_x[:4]
+    for i in range(0, len(pts) // 2):
+        x0 = int(max(0, min(width - 1, pts[2 * i])))
+        x1 = int(max(0, min(width - 1, pts[2 * i + 1])))
+        lo, hi = (x0, x1) if x0 <= x1 else (x1, x0)
+        mask[:, lo:hi + 1] = 0
+    return mask
+
+
+def _remap_pano_mask_to_view(pano_mask: np.ndarray, pitch_deg: float, yaw_deg: float) -> np.ndarray:
+    H = int(pano_mask.shape[0])
+    W = int(pano_mask.shape[1])
+    img_size, _, _, _ = _virtual_cam_from_pano_height(H, 90.0)
+    cam_w = cam_h = img_size
+
+    R = Rotation.from_euler("YX", [yaw_deg, pitch_deg], degrees=True).as_matrix()
+    # Build rays grid in camera
+    y, x = np.indices((cam_h, cam_w)).astype(np.float32)
+    x = x + 0.5
+    y = y + 0.5
+    focal = _virtual_cam_from_pano_height(H, 90.0)[1]
+    cx = cam_w / 2.0
+    cy = cam_h / 2.0
+    x_norm = (x - cx) / focal
+    y_norm = (y - cy) / focal
+    rays_cam = np.stack([x_norm, y_norm, np.ones_like(x_norm)], axis=-1)
+    rays_cam /= np.linalg.norm(rays_cam, axis=-1, keepdims=True)
+    rays_pano = np.tensordot(rays_cam, R, axes=([2],[1]))
+    xr, yr, zr = rays_pano[..., 0], rays_pano[..., 1], rays_pano[..., 2]
+    yaw = np.arctan2(xr, zr)
+    pitch = -np.arctan2(yr, np.hypot(xr, zr))
+    u = ((1.0 + yaw / np.pi) / 2.0) * W
+    v = ((1.0 - (pitch * 2.0 / np.pi)) / 2.0) * H
+    map_x = (u - 0.5).astype(np.float32)
+    map_y = (v - 0.5).astype(np.float32)
+    view_mask = cv2.remap(pano_mask, map_x, map_y, interpolation=cv2.INTER_NEAREST, borderMode=cv2.BORDER_WRAP)
+    return view_mask
+
+
+def _generate_and_write_rs_seam_masks(project_root: Path) -> int:
+    # If no seam points, skip
+    if len(_seam_points_x) < 2:
+        return 0
+    # Determine panorama size from frames or preview fallback
+    frames_root = project_root / "frames"
+    sample = next(iter(frames_root.glob("*.jpg")), None)
+    pano_img = None
+    if sample is not None and sample.exists():
+        pano_img = cv2.imread(str(sample), cv2.IMREAD_GRAYSCALE)
+    if pano_img is None:
+        # Fallback to preview panorama frame
+        preview_frame = project_root / "preview" / "frames" / "preview.jpg"
+        if preview_frame.exists():
+            pano_img = cv2.imread(str(preview_frame), cv2.IMREAD_GRAYSCALE)
+    if pano_img is None:
+        ui_log("[WARN] Could not determine panorama size (no frames or preview). Skipping RS seam masks.")
+        return 0
+    H, W = pano_img.shape[:2]
+
+    pano_mask = _build_pano_seam_mask(W, H, _seam_points_x)
+
+    pairs = _current_pairs()
+    total_written = 0
+    for idx, (pitch_deg, yaw_deg) in enumerate(pairs):
+        view_mask = _remap_pano_mask_to_view(pano_mask, pitch_deg, yaw_deg)
+        # Replicate mask per image in corresponding view folder
+        view_dir = project_root / "output" / "images" / f"pano_camera{idx}"
+        if not view_dir.exists():
+            continue
+        for img_path in sorted(view_dir.glob("*.jpg")):
+            out_name = view_dir / f"{img_path.stem}.mask.png"
+            cv2.imwrite(str(out_name), view_mask)
+            total_written += 1
+    if total_written > 0:
+        ui_log(f"[OK] Wrote {total_written} RS seam masks next to images under output/")
+    else:
+        ui_log("[WARN] No output images found to write RS seam masks. Run START SPLITTING first.")
+    return total_written
 # External steps (threaded helpers)
 # =========================
 
@@ -1073,6 +1395,11 @@ def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enable
     if not ok:
         ui_log("[ERROR] Rendering step failed. See log.")
         return SplitResult(project_root, seconds_per_frame, masking_enabled, video_count)
+    # Generate RS seam masks if seam points were defined
+    try:
+        _generate_and_write_rs_seam_masks(project_root)
+    except Exception as e:
+        ui_log(f"[WARN] RS seam mask generation failed: {e}")
     return SplitResult(
         project_root=project_root,
         seconds_per_frame=seconds_per_frame,
@@ -1467,6 +1794,24 @@ def main():
     global overlay_canvas
     overlay_canvas = Canvas(overlays_tab, bg="black", highlightthickness=0, height=520)
     overlay_canvas.pack(fill=BOTH, expand=True, pady=(6, 12))
+
+    # Masking tab
+    masking_tab = Frame(tabs, bg="black")
+    tabs.add(masking_tab, text="Masking")
+
+    mk_ctrl = Frame(masking_tab, bg="black")
+    mk_ctrl.pack(fill=BOTH, pady=(4, 6))
+    Button(mk_ctrl, text="Preview Mask", command=lambda: _on_preview_seam_mask()).pack(side="left", padx=(0, 8))
+    Button(mk_ctrl, text="Create Masks", command=lambda: _on_create_seam_masks_now()).pack(side="left", padx=(0, 8))
+    Button(mk_ctrl, text="Clear Last Point", command=lambda: _on_clear_last_seam_point()).pack(side="left")
+
+    global mask_canvas
+    mask_canvas = Canvas(masking_tab, bg="black", highlightthickness=0, height=520)
+    mask_canvas.pack(fill=BOTH, expand=True, pady=(6, 12))
+    try:
+        mask_canvas.bind('<Button-1>', _on_mask_canvas_click)
+    except Exception:
+        pass
 
     refresh_action_buttons()
 
