@@ -23,6 +23,8 @@ import uuid
 # Fixed GUID for multi-camera rig (hardware) and namespace for RigInstance generation
 RIG_GUID = uuid.UUID("8d3f3a2b-6b7c-4a2e-9c5d-2ecb3c6df7b1")
 RIGINSTANCE_NS = uuid.UUID("7f8a9b6e-1c2d-4e5f-8a9b-6e1c2d4e5f8a")
+# Fixed stereo-style baseline used for virtual rig (meters)
+RIG_BASELINE_M = 0.065
 
 
 def write_rc_xmp_minimal(
@@ -169,7 +171,7 @@ def create_pano_rig_config(
 ) -> pycolmap.RigConfig:
     """Create a RigConfig with proper stereo-style outward Z-offsets."""
     rig_cameras = []
-    baseline = 0.065  # 6.5cm stereo separation
+    baseline = RIG_BASELINE_M  # 6.5cm stereo separation
 
     for idx, cam_from_pano_rotation in enumerate(cams_from_pano_rotation):
         if idx == ref_idx:
@@ -255,8 +257,10 @@ def render_perspective_images(
         rig_instance_guid: uuid.UUID,
         rig_pose_index: int,
         cal_group: int,
-        pose_prior: str = "exact",
+        position_xyz: str,
+        pose_prior: str = "initial",
         coordinates: str = "absolute",
+        include_rotation: bool = True,
     ):
         """Write XMP (attribute-based xcr schema) with rig/instance/pose and calibration group.
         - Rotation attribute is 9 floats row-major (world->camera), orthonormalized
@@ -300,17 +304,22 @@ def render_perspective_images(
         #     " </rdf:RDF>\n"
         #     "</x:xmpmeta>\n"
         # )
+        rotation_element = f"   <xcr:Rotation>{rot_txt}</xcr:Rotation>\n" if include_rotation else ""
         xmp = (
             "<x:xmpmeta xmlns:x='adobe:ns:meta/'>\n"
             " <rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>\n"
             "  <rdf:Description xmlns:xcr='http://www.capturingreality.com/ns/xcr/1.1#' xcr:Version='3'\n"
-            f"                   xcr:PosePrior='{pose_prior}' xcr:Rotation='{rot_txt}' xcr:Coordinates='{coordinates}'\n"
-            "                   xcr:DistortionModel='division' xcr:DistortionCoeficients='0 0 0 0 0 0'\n"
-            f"                   xcr:FocalLength35mm='{f35:.6f}' xcr:Skew='0' xcr:AspectRatio='1' xcr:PrincipalPointU='0'\n"
-            f"                   xcr:PrincipalPointV='0' xcr:CalibrationPrior='initial' xcr:CalibrationGroup='{int(cal_group)}'\n"
-            f"                   xcr:DistortionGroup='-1' xcr:Rig='{rig_guid}' xcr:RigInstance='{rig_instance_guid}' xcr:RigPoseIndex='{int(rig_pose_index)}'\n"
+            f"                   xcr:PosePrior='exact' xcr:Coordinates='{coordinates}'\n"
+            "                    xcr:DistortionModel='perspective'\n"
+            f"                   xcr:Rotation='{rot_txt}' \n"
+            f"                   xcr:FocalLength35mm='{f35:.6f}' xcr:Skew='0' xcr:AspectRatio='1' xcr:PrincipalPointU='0' xcr:PrincipalPointV='0'\n"
+            f"                   xcr:CalibrationPrior='initial' xcr:CalibrationGroup='{int(cal_group)}'\n"
             f"                   xcr:InTexturing='1' xcr:InMeshing='1'>\n"
-            f"   <xcr:Position>0 0 0</xcr:Position>\n"
+            f"   <xcr:Rig>{rig_guid}</xcr:Rig>\n"
+            f"   <xcr:RigInstance>{rig_instance_guid}</xcr:RigInstance>\n"
+            f"   <xcr:RigPoseIndex>-1</xcr:RigPoseIndex>\n"
+            f"{rotation_element}"
+            f"   <xcr:Position>{position_xyz}</xcr:Position>\n"
             "  </rdf:Description>\n"
             " </rdf:RDF>\n"
             "</x:xmpmeta>\n"
@@ -454,22 +463,43 @@ def render_perspective_images(
                 # Our matrix cam_from_pano_r maps camera->world for the row-vector usage above,
                 # so we transpose it for XMP.
                 R_cam_from_world = cam_from_pano_r.T
+                # Compute rotation relative to reference camera (camera 0)
+                R_ref_cam_from_world = cams_from_pano_rotation[ref_idx].T
+                R_rel_cam_from_ref = R_cam_from_world @ R_ref_cam_from_world.T
                 # Derive per-pano rig instance GUID deterministically; fixed rig GUID
                 try:
                     rig_instance_guid = uuid.uuid5(RIGINSTANCE_NS, str(pano_name))
                 except Exception:
                     rig_instance_guid = uuid.uuid4()
-                cal_group = int(cam_idx)
+                # Compute per-camera relative translation (mimic rig separation logic)
+                if cam_idx == ref_idx:
+                    pos = np.array([0.0, 0.0, 0.0], dtype=float)
+                else:
+                    cam_from_ref_rotation = (
+                        cams_from_pano_rotation[cam_idx] @ cams_from_pano_rotation[ref_idx].T
+                    )
+                    # Views 1–5 = right lens, 6–10 = left lens (same as rig config logic)
+                    side = 1 if cam_idx <= 4 else -1
+                    local_offset = np.array([-RIG_BASELINE_M * side, 0.0, 0.0], dtype=float)
+                    # Relative translation in reference camera coordinates
+                    pos = cam_from_ref_rotation @ local_offset
+                pos_txt = " ".join(f"{v:.6f}" for v in pos.tolist())
+
+                # Use 1-based calibration groups to avoid RC treating 0 as unassigned
+                cal_group = int(cam_idx) + 1
                 write_rc_xmp_sidecar_v2(
                     image_path,
-                    R_cam_from_world,
+                    R_rel_cam_from_ref,
                     camera,
                     rig_guid=RIG_GUID,
                     rig_instance_guid=rig_instance_guid,
                     rig_pose_index=int(cam_idx),
                     cal_group=cal_group,
-                    pose_prior="exact",
-                    coordinates="absolute",
+                    position_xyz=pos_txt,
+                    # PosePrior exact for reference, initial otherwise
+                    pose_prior=("exact" if cam_idx == ref_idx else "initial"),
+                    coordinates="relative",
+                    include_rotation=True,
                 )
 
             # Write new-style mask (*.mask.png)
