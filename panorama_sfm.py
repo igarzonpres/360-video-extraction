@@ -51,7 +51,7 @@ def write_rc_xmp_minimal(
             R_ortho = U @ Vt
     except Exception:
         R_ortho = R
-    rot_txt = " ".join(f"{v:.15g}" for v in R_ortho.flatten(order="C"))
+    rot_txt = " ".join(f"{v:.15f}" for v in R_ortho.flatten(order="C"))
     pos_txt = position_xyz
 
     xmp = f"""
@@ -246,6 +246,83 @@ def render_perspective_images(
 
     rig_config = create_pano_rig_config(cams_from_pano_rotation, ref_idx=ref_idx)
 
+    def write_rc_xmp_sidecar_v2(
+        image_path: Path,
+        R_cam_from_world: np.ndarray,
+        camera: pycolmap.Camera,
+        *,
+        rig_guid: uuid.UUID,
+        rig_instance_guid: uuid.UUID,
+        rig_pose_index: int,
+        cal_group: int,
+        pose_prior: str = "exact",
+        coordinates: str = "absolute",
+    ):
+        """Write XMP (attribute-based xcr schema) with rig/instance/pose and calibration group.
+        - Rotation attribute is 9 floats row-major (world->camera), orthonormalized
+        - Intrinsics include FocalLength35mm; simple center principal point, no distortion
+        - CalibrationGroup ties same pano_camera_idx across different panoramas
+        """
+        # Intrinsics
+        try:
+            params = np.array(camera.params, dtype=float)
+        except Exception:
+            params = None
+        if params is not None and params.size >= 1:
+            f_px = float(params[0])
+        else:
+            f_px = float(getattr(camera, "focal_length", 0.0) or 0.0)
+        width = int(camera.width)
+        f35 = 36.0 * f_px / float(width) if width > 0 else 0.0
+
+        # Orthonormalize rotation and flatten row-major
+        r = np.asarray(R_cam_from_world, dtype=float).reshape(3, 3)
+        try:
+            U, _, Vt = np.linalg.svd(r)
+            r = U @ Vt
+            if np.linalg.det(r) < 0:
+                U[:, -1] *= -1
+                r = U @ Vt
+        except Exception:
+            pass
+        rot_txt = " ".join(f"{v:.15f}" for v in r.flatten(order="C"))
+
+        # xmp = (
+        #     "<x:xmpmeta xmlns:x='adobe:ns:meta/'>\n"
+        #     " <rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>\n"
+        #     f"  <rdf:Description xmlns:xcr='http://www.capturingreality.com/ns/xcr/1.1#' xcr:Version='3'\n"
+        #     f"                   xcr:PosePrior='{pose_prior}' xcr:Rotation='{rot_txt}' xcr:Coordinates='{coordinates}'\n"
+        #     "                   xcr:DistortionModel='division' xcr:DistortionCoeficients='0 0 0 0 0 0'\n"
+        #     f"                   xcr:FocalLength35mm='{f35:.6f}' xcr:Skew='0' xcr:AspectRatio='1' xcr:PrincipalPointU='0'\n"
+        #     f"                   xcr:PrincipalPointV='0' xcr:CalibrationPrior='exact' xcr:CalibrationGroup='{int(cal_group)}'\n"
+        #     f"                   xcr:Rig='{rig_guid}' xcr:RigInstance='{rig_instance_guid}' xcr:RigPoseIndex='{int(rig_pose_index)}'>\n"
+        #     "  </rdf:Description>\n"
+        #     " </rdf:RDF>\n"
+        #     "</x:xmpmeta>\n"
+        # )
+        xmp = (
+            "<x:xmpmeta xmlns:x='adobe:ns:meta/'>\n"
+            " <rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>\n"
+            "  <rdf:Description xmlns:xcr='http://www.capturingreality.com/ns/xcr/1.1#' xcr:Version='3'\n"
+            f"                   xcr:PosePrior='{pose_prior}' xcr:Rotation='{rot_txt}' xcr:Coordinates='{coordinates}'\n"
+            "                   xcr:DistortionModel='division' xcr:DistortionCoeficients='0 0 0 0 0 0'\n"
+            f"                   xcr:FocalLength35mm='{f35:.6f}' xcr:Skew='0' xcr:AspectRatio='1' xcr:PrincipalPointU='0'\n"
+            f"                   xcr:PrincipalPointV='0' xcr:CalibrationPrior='initial' xcr:CalibrationGroup='{int(cal_group)}'\n"
+            f"                   xcr:DistortionGroup='-1' xcr:Rig='{rig_guid}' xcr:RigInstance='{rig_instance_guid}' xcr:RigPoseIndex='{int(rig_pose_index)}'\n"
+            f"                   xcr:InTexturing='1' xcr:InMeshing='1'>\n"
+            f"   <xcr:Position>0 0 0</xcr:Position>\n"
+            "  </rdf:Description>\n"
+            " </rdf:RDF>\n"
+            "</x:xmpmeta>\n"
+        )
+
+
+        image_path.with_suffix('.xmp').write_text(xmp, encoding='utf-8')
+        try:
+            logging.info(f"[XMP] wrote {image_path.with_suffix('.xmp')} (cal_group={cal_group}; rig_pose_index={rig_pose_index})")
+        except Exception:
+            pass
+
     def write_rc_xmp_sidecar(
         image_path: Path,
         R_cam_from_world: np.ndarray,
@@ -254,6 +331,7 @@ def render_perspective_images(
         rig_guid: uuid.UUID,
         rig_instance_guid: uuid.UUID,
         rig_pose_index: int,
+        cal_group: int,
         position_xyz: str,
         pose_prior: str = "exact",
         coordinates: str = "absolute",
@@ -280,36 +358,14 @@ def render_perspective_images(
 
         # Flatten rotation row-major
         r = R_cam_from_world.astype(float).reshape(3, 3)
-        rot_txt = " ".join(f"{v:.15g}" for v in r.flatten(order="C"))
+        rot_txt = " ".join(f"{v:.15f}" for v in r.flatten(order="C"))
         pos_txt = "0 0 0"
 
-        xmp = f"""<?xpacket begin='ï»¿' id='W5M0MpCehiHzreSzNTczkc9d'?>
-<x:xmpmeta xmlns:x='adobe:ns:meta/'>
- <rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>
-  <rdf:Description xmlns:xcr='http://www.capturingreality.com/ns/xcr/1.1#'
-                   xcr:Version='2'
-                   xcr:DistortionModel='perspective'
-                   xcr:DistortionCoeficients='0 0 0 0 0 0'
-                   xcr:FocalLength35mm='{f35:.6f}'
-                   xcr:Skew='0'
-                   xcr:AspectRatio='1'
-                   xcr:PrincipalPointU='0'
-                   xcr:PrincipalPointV='0'
-                   xcr:InTexturing='1'
-                   xcr:InColoring='0'
-                   xcr:InMeshing='1'
-                   xcr:Coordinates='{coordinates}'
-                   xcr:PosePrior='{pose_prior}'>
-   <xcr:Rig>{rig_guid}</xcr:Rig>
-   <xcr:RigInstance>{rig_instance_guid}</xcr:RigInstance>
-   <xcr:RigPoseIndex>{rig_pose_index}</xcr:RigPoseIndex>
-   <xcr:Position>{pos_txt}</xcr:Position>
-   <xcr:Rotation>{rot_txt}</xcr:Rotation>
-  </rdf:Description>
- </rdf:RDF>
-</x:xmpmeta>
-<?xpacket end='w'?>
-"""
+       
+        xmp = ""
+        # (old XMP body removed)
+                               
+
         image_path.with_suffix('.xmp').write_text(xmp, encoding='utf-8')
         try:
             logging.info(f"[XMP] wrote {image_path.with_suffix('.xmp')} (rig+instance+pose index; PosePrior={pose_prior})")
@@ -403,14 +459,17 @@ def render_perspective_images(
                     rig_instance_guid = uuid.uuid5(RIGINSTANCE_NS, str(pano_name))
                 except Exception:
                     rig_instance_guid = uuid.uuid4()
-                write_rc_xmp_minimal(
+                cal_group = int(cam_idx)
+                write_rc_xmp_sidecar_v2(
                     image_path,
                     R_cam_from_world,
+                    camera,
                     rig_guid=RIG_GUID,
                     rig_instance_guid=rig_instance_guid,
                     rig_pose_index=int(cam_idx),
-                    position_xyz="0 0 0",
+                    cal_group=cal_group,
                     pose_prior="exact",
+                    coordinates="absolute",
                 )
 
             # Write new-style mask (*.mask.png)
