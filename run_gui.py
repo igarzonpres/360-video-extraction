@@ -294,37 +294,37 @@ def _refresh_preview_grid(preview_root: Path):
     imgs = _collect_preview_images(out_dir)
     # Build 1x9 horizontal strip
     for i, img_path in enumerate(imgs):
-        cell = Frame(preview_grid, bg="black")
+        cell = Frame(preview_grid, bg=PALETTE["bg"])
         cell.grid(row=0, column=i, padx=4, pady=4, sticky="n")
         if img_path and img_path.exists():
             try:
                 im = Image.open(img_path)
                 im.thumbnail((175, 175))
                 ph = ImageTk.PhotoImage(im)
-                lbl = Label(cell, image=ph, bg="black")
+                lbl = Label(cell, image=ph, bg=PALETTE["bg"]) 
                 lbl.image = ph
                 _preview_imgs.append(ph)
                 lbl.pack()
             except Exception:
-                Label(cell, text="(image error)", bg="black", fg="white").pack()
+                Label(cell, text="(image error)", bg=PALETTE["bg"], fg=PALETTE["muted_fg"]).pack()
         else:
-            Label(cell, text="(no image)", bg="black", fg="white").pack()
+            Label(cell, text="(no image)", bg=PALETTE["bg"], fg=PALETTE["muted_fg"]).pack()
         # Sliders
-        # Label(cell, text=f"View {i}", bg="black", fg="#ccc").pack()
+        # Label(cell, text=f"View {i}", bg=PALETTE["bg"], fg=PALETTE["muted_fg"]).pack()
         # yaw = _yaw_vars[i]
         # pitch = _pitch_vars[i]
         # Scale(cell, from_=-180, to=180, orient="horizontal", length=150, label="Yaw", variable=yaw).pack()
         # Scale(cell, from_=-90, to=90, orient="horizontal", length=150, label="Pitch", variable=pitch).pack()
-        Label(cell, text=f"View {i}", bg="black", fg="#ccc").pack()
+        Label(cell, text=f"View {i}", bg=PALETTE["bg"], fg=PALETTE["muted_fg"]).pack()
         yaw = _yaw_vars[i]
         pitch = _pitch_vars[i]
         # Yaw row: slider + numeric entry
-        yaw_row = Frame(cell, bg="black"); yaw_row.pack()
+        yaw_row = Frame(cell, bg=PALETTE["bg"]); yaw_row.pack()
         Scale(yaw_row, from_=-180, to=180, orient="horizontal",
               length=130, label="Yaw", variable=yaw).pack(side="left")
         Entry(yaw_row, textvariable=yaw, width=6, justify="right").pack(side="left", padx=(4,0))
         # Pitch row: slider + numeric entry
-        pitch_row = Frame(cell, bg="black"); pitch_row.pack()
+        pitch_row = Frame(cell, bg=PALETTE["bg"]); pitch_row.pack()
         Scale(pitch_row, from_=-90, to=90, orient="horizontal",
               length=130, label="Pitch", variable=pitch).pack(side="left")
         Entry(pitch_row, textvariable=pitch, width=6, justify="right").pack(side="left", padx=(4,0))
@@ -1461,7 +1461,7 @@ def main():
     prev_ctrl.pack(fill=BOTH, pady=(4, 6))
     Label(prev_ctrl, text="Preview time (HH:MM:SS)", bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(side="left")
     Entry(prev_ctrl, textvariable=preview_time_var, width=10).pack(side="left", padx=(6, 12))
-    Button(prev_ctrl, text="Compute views", command=_on_compute_views).pack(side="left")
+    Button(prev_ctrl, text="Compute views", command=_on_compute_views, **_btn_style()).pack(side="left")
 
     # 3x3 preview grid
     global preview_grid
@@ -1481,7 +1481,7 @@ def main():
     ov_ctrl = Frame(overlays_tab, bg=PALETTE["bg"])
     ov_ctrl.pack(fill=BOTH, pady=(4, 6))
     Label(ov_ctrl, text="Uses Preview time", bg=PALETTE["bg"], fg=PALETTE["muted_fg"]).pack(side="left", padx=(0, 12))
-    Button(ov_ctrl, text="Refresh Overlays", command=_on_refresh_overlays).pack(side="left")
+    Button(ov_ctrl, text="Refresh Overlays", command=_on_refresh_overlays, **_btn_style()).pack(side="left")
 
     global overlay_canvas
     overlay_canvas = Canvas(overlays_tab, bg=PALETTE["canvas_bg"], highlightthickness=0, height=520)
