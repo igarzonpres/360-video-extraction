@@ -23,6 +23,7 @@ import numpy as np  # NEW: for mask processing
 from typing import List, Tuple, Optional
 import shutil
 import json as _json
+import shutil as _shutil
 
 # =========================
 # UI palette (centralized)
@@ -135,6 +136,11 @@ status_var = None
 # progress_main = None
 progress_sub = None
 log_text = None
+invert_panos_var = None  # GUI checkbox for 180° panorama inversion
+
+# Paths configured via Settings tab
+ffmpeg_path_var = None
+jpegtran_path_var = None
 
 use_masking = None
 frame_interval = None
@@ -257,20 +263,31 @@ def _write_rotation_override_for_dir(root_dir: Path):
 def _extract_preview_frame(video_path: Path, time_hms: str, out_file: Path) -> bool:
     try:
         out_file.parent.mkdir(parents=True, exist_ok=True)
-        # Try ffmpeg first
-        cmd = [
-            "ffmpeg", "-y",
-            "-ss", time_hms,
-            "-i", str(video_path),
-            "-frames:v", "1",
-            "-q:v", "2",
-            str(out_file),
-        ]
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if proc.returncode == 0 and out_file.exists():
-            return True
-    except Exception:
-        pass
+        # Try ffmpeg first, resolving from settings or PATH
+        exe = None
+        try:
+            cfg = ffmpeg_path_var.get() if ffmpeg_path_var is not None else ""
+            exe = cfg.strip() or None
+        except Exception:
+            exe = None
+        if not exe:
+            exe = _shutil.which("ffmpeg")
+        if exe:
+            cmd = [
+                exe, "-y",
+                "-ss", time_hms,
+                "-i", str(video_path),
+                "-frames:v", "1",
+                "-q:v", "2",
+                str(out_file),
+            ]
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if proc.returncode == 0 and out_file.exists():
+                return True
+        else:
+            ui_log("[ERROR] ffmpeg not configured and not found in PATH. Falling back to OpenCV.")
+    except Exception as e:
+        ui_log(f"[WARN] ffmpeg preview extraction failed ({e}). Falling back to OpenCV.")
     # Fallback to OpenCV
     try:
         h, m, s = [int(x) for x in time_hms.split(":")]
@@ -287,6 +304,74 @@ def _extract_preview_frame(video_path: Path, time_hms: str, out_file: Path) -> b
         cv2.imwrite(str(out_file), frame)
         return True
     return False
+
+
+def _resolve_jpegtran_exe() -> Optional[str]:
+    """Return jpegtran executable path if configured and exists; else try PATH; else None."""
+    try:
+        cfg = jpegtran_path_var.get() if jpegtran_path_var is not None else ""
+        exe = cfg.strip()
+        if exe:
+            p = Path(exe)
+            if p.exists():
+                return str(p)
+    except Exception:
+        pass
+    found = _shutil.which("jpegtran")
+    return found
+
+
+def _rotate_panoramas_in_dir(frames_root: Path) -> bool:
+    """Rotate all .jpg in frames_root by 180° using jpegtran, preserving metadata.
+    Returns True if at least one rotation succeeded or if there were no images; False if jpegtran missing or all failed.
+    """
+    if not frames_root.exists():
+        return True
+    imgs = sorted(frames_root.glob("*.jpg"))
+    if not imgs:
+        return True
+    exe = _resolve_jpegtran_exe()
+    if not exe:
+        ui_log("[WARN] jpegtran not configured or not found. Set it under Settings > jpegtran.exe path.")
+        try:
+            messagebox.showwarning("jpegtran missing", "jpegtran.exe not found. Set it in the Settings tab or add to PATH. Continuing without inversion.")
+        except Exception:
+            pass
+        return False
+    ok_count = 0
+    for src in imgs:
+        try:
+            tmp = src.with_suffix(".rot180.jpg")
+            cmd = _jpegtran_cmd(exe, src, tmp)
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if proc.returncode == 0 and tmp.exists():
+                try:
+                    tmp.replace(src)
+                except Exception:
+                    _shutil.move(str(tmp), str(src))
+                ok_count += 1
+            else:
+                try:
+                    err = proc.stderr.decode(errors='ignore') if proc.stderr is not None else ''
+                except Exception:
+                    err = ''
+                ui_log(f"[WARN] jpegtran failed for {src.name}: {err[:200]}")
+                if tmp.exists():
+                    try:
+                        tmp.unlink()
+                    except Exception:
+                        pass
+        except Exception as e:
+            ui_log(f"[WARN] jpegtran error for {src.name}: {e}")
+    if ok_count > 0:
+        ui_log(f"[OK] Inverted {ok_count}/{len(imgs)} panorama(s) with jpegtran.")
+        return True
+    return False
+
+
+def _jpegtran_cmd(exe: str, src: Path, dst: Path) -> list[str]:
+    # IJG jpegtran expects output via -outfile <dst> then <src>
+    return [str(exe), "-rotate", "180", "-copy", "all", "-perfect", "-outfile", str(dst), str(src)]
 
 
 def _collect_preview_images(preview_out: Path) -> List[Path]:
@@ -386,6 +471,15 @@ def _on_compute_views():
     if not _extract_preview_frame(video_path, preview_time_var.get(), frame_file):
         ui_log("[ERROR] Failed to extract preview frame. Ensure ffmpeg is installed or try another time.")
         return
+
+    # Optional panorama inversion before preview split
+    try:
+        inv = bool(invert_panos_var.get()) if invert_panos_var is not None else False
+    except Exception:
+        inv = False
+    if inv:
+        ui_status("Inverting panorama (preview) with jpegtran…")
+        _rotate_panoramas_in_dir(frame_file.parent)
 
     # Write override using current sliders
     _write_rotation_override_for_dir(preview_root)
@@ -1108,6 +1202,17 @@ def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enable
     video_count = extract_frames_with_progress(project_root, seconds_per_frame, start_seconds, end_seconds)
     frames_root = project_root / "frames"
 
+    # Optional panorama inversion before any split/render/mask
+    try:
+        inv = bool(invert_panos_var.get()) if invert_panos_var is not None else False
+    except Exception:
+        inv = False
+    if inv:
+        ui_status("Inverting panoramas with jpegtran…")
+        ok_inv = _rotate_panoramas_in_dir(frames_root)
+        if not ok_inv:
+            ui_log("[INFO] Proceeding without inversion (jpegtran missing or failed).")
+
     if masking_enabled:
         ui_status("Writing rotation override (masking)...")
         write_rotation_override(project_root, _current_pairs(), MASKING_REF_IDX)
@@ -1369,6 +1474,8 @@ def main():
     global _root, status_var, progress_sub, log_text
     global use_masking, frame_interval, start_time_var, end_time_var, browse_btn, last_btn, split_btn, align_btn
     global export_rc_xmp
+    global invert_panos_var
+    global ffmpeg_path_var, jpegtran_path_var
     global yolo_model_path, yolo_conf, yolo_dilate_px, yolo_invert_mask, yolo_apply_to_rgb, _yolo_widgets
 
     _root = Tk()
@@ -1449,6 +1556,18 @@ def main():
     )
     xmp_cb.pack(side="left", padx=(12,0))
 
+    # Invert panoramas checkbox
+    invert_panos_var = BooleanVar(value=False)
+    invert_cb = Checkbutton(
+        ctrl,
+        text="Invert panoramas",
+        variable=invert_panos_var,
+        onvalue=True, offvalue=False,
+        bg=PALETTE["bg"], fg=PALETTE["fg"], activebackground=PALETTE["bg"],
+        selectcolor=PALETTE["bg"],
+    )
+    invert_cb.pack(side="left", padx=(12,0))
+
 
     # ---------- Time Range ----------
     range_frame = Frame(_root, bg=PALETTE["bg"])
@@ -1502,6 +1621,41 @@ def main():
     _ensure_preview_vars(reset_with_defaults=True)
     tabs = ttk.Notebook(_root)
     tabs.pack(fill=BOTH, expand=True, padx=16, pady=(8, 6))
+
+    # Settings tab (first)
+    settings_tab = Frame(tabs, bg=PALETTE["bg"])
+    tabs.add(settings_tab, text="Settings")
+
+    paths_frame = Frame(settings_tab, bg=PALETTE["bg"])
+    paths_frame.pack(fill=BOTH, pady=(8, 8))
+
+    # jpegtran path selector
+    Label(paths_frame, text="jpegtran.exe path", bg=PALETTE["bg"], fg=PALETTE["fg"]).grid(row=0, column=0, sticky="w", padx=(0,8), pady=4)
+    default_jpegtran = r"C:Users/test/Downloads/jpegtran.exe"
+    jpegtran_path_var = StringVar(value=default_jpegtran)
+    jt_entry = Entry(paths_frame, textvariable=jpegtran_path_var, width=72)
+    jt_entry.grid(row=0, column=1, sticky="we", pady=4)
+    def _browse_jpegtran():
+        p = filedialog.askopenfilename(title="Select jpegtran.exe", filetypes=[["Executable", "*.exe"], ["All files", "*.*"]])
+        if p:
+            jpegtran_path_var.set(p)
+    Button(paths_frame, text="Browse", command=_browse_jpegtran, **_btn_style()).grid(row=0, column=2, padx=(8,0))
+
+    # ffmpeg path selector
+    Label(paths_frame, text="ffmpeg.exe path", bg=PALETTE["bg"], fg=PALETTE["fg"]).grid(row=1, column=0, sticky="w", padx=(0,8), pady=4)
+    ffmpeg_path_var = StringVar(value="")
+    ff_entry = Entry(paths_frame, textvariable=ffmpeg_path_var, width=72)
+    ff_entry.grid(row=1, column=1, sticky="we", pady=4)
+    def _browse_ffmpeg():
+        p = filedialog.askopenfilename(title="Select ffmpeg.exe", filetypes=[["Executable", "*.exe"], ["All files", "*.*"]])
+        if p:
+            ffmpeg_path_var.set(p)
+    Button(paths_frame, text="Browse", command=_browse_ffmpeg, **_btn_style()).grid(row=1, column=2, padx=(8,0))
+    # Make grid columns stretch
+    try:
+        paths_frame.grid_columnconfigure(1, weight=1)
+    except Exception:
+        pass
 
     # Preview tab
     preview_tab = Frame(tabs, bg=PALETTE["bg"])
