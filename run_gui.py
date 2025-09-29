@@ -1531,86 +1531,20 @@ def main():
     last_btn = Button(btns, text="Run Last Chosen Folder", state=DISABLED, command=run_last, **btn_style)
     last_btn.pack(side="left", padx=6)
 
-    # ---------- Controls ----------
-    ctrl = Frame(_root, bg=PALETTE["bg"])
-    ctrl.pack(pady=(8, 2))
-
-    Label(ctrl, text="Extract 1 frame per", bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(side="left")
-
-    frame_interval = StringVar(value="1")
-    Entry(ctrl, textvariable=frame_interval, width=6).pack(side="left", padx=(6, 6))
-
-    Label(ctrl, text="seconds", bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(side="left", padx=(0, 16))
-
-    use_masking = BooleanVar(value=False)
-    mcb = Checkbutton(
-        ctrl,
-        text="Enable Person Masking",
-        variable=use_masking,
-        onvalue=True, offvalue=False,
-        bg=PALETTE["bg"], fg=PALETTE["fg"], activebackground=PALETTE["bg"],
-        selectcolor=PALETTE["bg"],
-    )
-    mcb.pack(side="left")
-
-    # XMP export toggle
-    export_rc_xmp = BooleanVar(value=False)
-    xmp_cb = Checkbutton(
-        ctrl,
-        text="RC XMP Export XMP",
-        variable=export_rc_xmp,
-        onvalue=True, offvalue=False,
-        bg=PALETTE["bg"], fg=PALETTE["fg"], activebackground=PALETTE["bg"],
-        selectcolor=PALETTE["bg"],
-    )
-    xmp_cb.pack(side="left", padx=(12,0))
-
-    # Invert panoramas checkbox
-    invert_panos_var = BooleanVar(value=False)
-    invert_cb = Checkbutton(
-        ctrl,
-        text="Invert panoramas",
-        variable=invert_panos_var,
-        onvalue=True, offvalue=False,
-        bg=PALETTE["bg"], fg=PALETTE["fg"], activebackground=PALETTE["bg"],
-        selectcolor=PALETTE["bg"],
-    )
-    invert_cb.pack(side="left", padx=(12,0))
-
-
-    # ---------- Time Range ----------
-    range_frame = Frame(_root, bg=PALETTE["bg"])
-    range_frame.pack(pady=(6, 2))
-
-    start_lbl = Label(range_frame, text="Start (hh:mm:ss)", bg=PALETTE["bg"], fg=PALETTE["fg"])
-    start_lbl.pack(side="left", padx=(0, 6))
-    start_time_var = StringVar(value="")
-    Entry(range_frame, textvariable=start_time_var, width=10).pack(side="left", padx=(0, 16))
-
-    end_lbl = Label(range_frame, text="End (hh:mm:ss)", bg=PALETTE["bg"], fg=PALETTE["fg"])
-    end_lbl.pack(side="left", padx=(0, 6))
-    end_time_var = StringVar(value="")
-    Entry(range_frame, textvariable=end_time_var, width=10).pack(side="left")
-
-    # ---------- Stage Controls ----------
-    stage_btns = Frame(_root, bg=PALETTE["bg"])
-    stage_btns.pack(pady=(0, 12))
-    split_btn = Button(stage_btns, text="START SPLITTING", state=DISABLED, command=on_start_split, **btn_style)
-    split_btn.pack(side="left", padx=6)
-    align_btn = Button(stage_btns, text="START ALIGNING", state=DISABLED, command=on_start_align, **btn_style)
-    align_btn.pack(side="left", padx=6)
-    
-    # ---------- Progress ----------
-    prog = Frame(_root, bg=PALETTE["bg"])
-    prog.pack(fill=BOTH, padx=16, pady=(12, 4))
-
-    # Label(prog, text="Overall Progress", bg="black", fg="#ccc").pack(anchor="w")
-    # progress_main = ttk.Progressbar(prog, orient="horizontal", mode="determinate", length=680)
-    # progress_main.pack(pady=(2, 8))
-
-    Label(prog, text="Current Task", bg=PALETTE["bg"], fg=PALETTE["muted_fg"]).pack(anchor="w")
-    progress_sub = ttk.Progressbar(prog, orient="horizontal", mode="determinate", length=680)
+    # Current Task progress just below browse buttons
+    prog_top = Frame(_root, bg=PALETTE["bg"])
+    prog_top.pack(fill=BOTH, padx=16, pady=(8, 4))
+    Label(prog_top, text="Current Task", bg=PALETTE["bg"], fg=PALETTE["muted_fg"]).pack(anchor="w")
+    progress_sub = ttk.Progressbar(prog_top, orient="horizontal", mode="determinate", length=680)
     progress_sub.pack(pady=(2, 8))
+
+    # ---------- Controls ----------
+    # Moved to tabs per user request
+
+
+    # ---------- Time Range / Stage Controls moved to Splitting tab ----------
+    
+    # ---------- Progress moved into Splitting tab ----------
 
     status_var = StringVar(value="Idle.")
     Label(_root, textvariable=status_var, bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(pady=(0, 6))
@@ -1621,12 +1555,9 @@ def main():
     log_text.pack(fill=BOTH)
     log_text.configure(state=DISABLED)
 
-    # ---------- Preset Toggle (placed above Preview/Overlays) ----------
-    preset_ctrl = Frame(_root, bg="black")
-    preset_ctrl.pack(pady=(0, 6))
-    Button(preset_ctrl, text="Invert Yaw Values", command=_on_toggle_inverted_preset, **btn_style).pack(side="left")
+    # Preset toggle moved to Settings tab
 
-    # ---------- Preview / Overlays Tabs ----------
+    # ---------- Tabs ----------
     _ensure_preview_vars(reset_with_defaults=True)
     tabs = ttk.Notebook(_root)
     tabs.pack(fill=BOTH, expand=True, padx=16, pady=(8, 6))
@@ -1634,6 +1565,44 @@ def main():
     # Settings tab (first)
     settings_tab = Frame(tabs, bg=PALETTE["bg"])
     tabs.add(settings_tab, text="Settings")
+
+    # Settings: stacked toggles
+    # Person masking
+    use_masking = BooleanVar(value=False)
+    Checkbutton(settings_tab, text="Enable Person Masking", variable=use_masking,
+                onvalue=True, offvalue=False, bg=PALETTE["bg"], fg=PALETTE["fg"],
+                activebackground=PALETTE["bg"], selectcolor=PALETTE["bg"],
+                command=on_masking_toggle).pack(anchor="w", padx=8, pady=(10,2))
+
+    # XMP export
+    export_rc_xmp = BooleanVar(value=False)
+    Checkbutton(settings_tab, text="RC XMP Export XMP", variable=export_rc_xmp,
+                onvalue=True, offvalue=False, bg=PALETTE["bg"], fg=PALETTE["fg"],
+                activebackground=PALETTE["bg"], selectcolor=PALETTE["bg"]).pack(anchor="w", padx=8, pady=2)
+
+    # Invert panoramas
+    invert_panos_var = BooleanVar(value=False)
+    Checkbutton(settings_tab, text="Invert panoramas", variable=invert_panos_var,
+                onvalue=True, offvalue=False, bg=PALETTE["bg"], fg=PALETTE["fg"],
+                activebackground=PALETTE["bg"], selectcolor=PALETTE["bg"]).pack(anchor="w", padx=8, pady=2)
+
+    # Invert yaw values preset
+    def _on_invert_yaw_var_toggle():
+        # Sync global flag and update sliders
+        global inverted_preset_active
+        try:
+            inverted_preset_active = bool(invert_yaw_var.get())
+            pairs = _default_pairs(masking_enabled=bool(use_masking.get()))
+            _apply_pairs_to_vars(pairs)
+            ui_status("Using inverted yaw preset." if inverted_preset_active else "Using default yaw preset.")
+        except Exception:
+            pass
+
+    invert_yaw_var = BooleanVar(value=False)
+    Checkbutton(settings_tab, text="Invert yaw values", variable=invert_yaw_var,
+                onvalue=True, offvalue=False, bg=PALETTE["bg"], fg=PALETTE["fg"],
+                activebackground=PALETTE["bg"], selectcolor=PALETTE["bg"],
+                command=_on_invert_yaw_var_toggle).pack(anchor="w", padx=8, pady=2)
 
     paths_frame = Frame(settings_tab, bg=PALETTE["bg"])
     paths_frame.pack(fill=BOTH, pady=(8, 8))
@@ -1665,6 +1634,38 @@ def main():
         paths_frame.grid_columnconfigure(1, weight=1)
     except Exception:
         pass
+
+    # Splitting tab
+    splitting_tab = Frame(tabs, bg=PALETTE["bg"])
+    tabs.add(splitting_tab, text="Splitting")
+
+    split_ctrl = Frame(splitting_tab, bg=PALETTE["bg"])
+    split_ctrl.pack(pady=(8, 2), fill=BOTH)
+
+    Label(split_ctrl, text="Extract 1 frame per", bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(side="left")
+    frame_interval = StringVar(value="1")
+    Entry(split_ctrl, textvariable=frame_interval, width=6).pack(side="left", padx=(6, 6))
+    Label(split_ctrl, text="seconds", bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(side="left", padx=(0, 16))
+
+    range_frame = Frame(splitting_tab, bg=PALETTE["bg"])
+    range_frame.pack(pady=(6, 2))
+    start_lbl = Label(range_frame, text="Start (hh:mm:ss)", bg=PALETTE["bg"], fg=PALETTE["fg"])
+    start_lbl.pack(side="left", padx=(0, 6))
+    start_time_var = StringVar(value="")
+    Entry(range_frame, textvariable=start_time_var, width=10).pack(side="left", padx=(0, 16))
+    end_lbl = Label(range_frame, text="End (hh:mm:ss)", bg=PALETTE["bg"], fg=PALETTE["fg"])
+    end_lbl.pack(side="left", padx=(0, 6))
+    end_time_var = StringVar(value="")
+    Entry(range_frame, textvariable=end_time_var, width=10).pack(side="left")
+
+    stage_btns = Frame(splitting_tab, bg=PALETTE["bg"])
+    stage_btns.pack(pady=(0, 12))
+    split_btn = Button(stage_btns, text="START SPLITTING", state=DISABLED, command=on_start_split, **btn_style)
+    split_btn.pack(side="left", padx=6)
+    align_btn = Button(stage_btns, text="START ALIGNING", state=DISABLED, command=on_start_align, **btn_style)
+    align_btn.pack(side="left", padx=6)
+
+    # (Progress bar is displayed at the top area)
 
     # Preview tab
     preview_tab = Frame(tabs, bg=PALETTE["bg"])
