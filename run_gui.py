@@ -710,6 +710,15 @@ def _on_refresh_overlays():
         ui_log("[ERROR] Failed to extract panorama frame for overlays.")
         return
 
+    # Optional panorama inversion for overlays background image
+    try:
+        inv = bool(invert_panos_var.get()) if invert_panos_var is not None else False
+    except Exception:
+        inv = False
+    if inv:
+        ui_status("Inverting panorama (overlays) with jpegtran…")
+        _rotate_panoramas_in_dir(frame_file.parent)
+
     # Prefer using the same rotations used by the preview (if present)
     # to ensure overlays match the preview exactly.
     pairs: List[Tuple[float, float]]
