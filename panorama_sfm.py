@@ -222,27 +222,22 @@ def render_perspective_images(
         rot_txt = " ".join(f"{v:.15g}" for v in r.flatten(order="C"))
         pos_txt = "0 0 0"
 
-        xmp = f"""<?xpacket begin='ï»¿' id='W5M0MpCehiHzreSzNTczkc9d'?>
-<x:xmpmeta xmlns:x='adobe:ns:meta/'>
- <rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>
-  <rdf:Description xmlns:xcr='http://www.capturingreality.com/ns/xcr/1.1#'
-                   xcr:Version='2'
-                   xcr:DistortionModel='perspective'
-                   xcr:DistortionCoeficients='0 0 0 0 0 0'
-                   xcr:FocalLength35mm='{f35:.6f}'
-                   xcr:Skew='0'
-                   xcr:AspectRatio='1'
-                   xcr:PrincipalPointU='0'
-                   xcr:PrincipalPointV='0'
-                   xcr:InTexturing='1'
-                   xcr:InColoring='0'
-                   xcr:InMeshing='1'>
-   <xcr:Rotation>{rot_txt}</xcr:Rotation>
-  </rdf:Description>
- </rdf:RDF>
-</x:xmpmeta>
-<?xpacket end='w'?>
-"""
+        xmp = f"""
+                <x:xmpmeta xmlns:x="adobe:ns:meta/"> 
+                    <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+                        <rdf:Description xmlns:xcr="http://www.capturingreality.com/ns/xcr/1.1#" xcr:Version="3"
+                                xcr:PosePrior="initial" xcr:Rotation="{rot_txt}" xcr:Coordinates="absolute"
+                                xcr:DistortionModel="division" xcr:DistortionCoeficients="0 0 0 0 0 0"
+                                xcr:FocalLength35mm="{f35:.6f}" xcr:Skew="0" xcr:AspectRatio="1" xcr:PrincipalPointU="0"   
+                                xcr:PrincipalPointV="0" xcr:CalibrationPrior="initial" xcr:CalibrationGroup="-1"
+                                xcr:DistortionGroup="-1" xcr:Rig="1E204070-A17D-444E-9455-493C15B37B93"
+                                xcr:RigInstance="2DC9F356-432F-4234-9148-DC2655788342" xcr:RigPoseIndex="-1"
+                                xcr:InTexturing="1" xcr:InMeshing="1">
+                                <xcr:Position>0 0 0</xcr:Position>
+                        </rdf:Description>
+                    </rdf:RDF>
+                </x:xmpmeta>
+            """
         image_path.with_suffix('.xmp').write_text(xmp, encoding='utf-8')
         try:
             logging.info(f"[XMP] wrote {image_path.with_suffix('.xmp')} (rotation prior only; pose/calibration not locked; no position)")

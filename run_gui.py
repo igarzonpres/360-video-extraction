@@ -25,6 +25,37 @@ import shutil
 import json as _json
 
 # =========================
+# UI palette (centralized)
+# =========================
+# Light theme palette used across the GUI. To tweak the theme,
+# change values here instead of per-widget.
+PALETTE = {
+    "bg": "white",              # main window and frames
+    "fg": "#222222",           # primary text
+    "muted_fg": "#555555",     # secondary text
+    "panel_bg": "#f7f7f7",     # panel/sections background (if needed)
+    "drop_bg": "#efefef",      # drop zone background
+    "btn_bg": "#e6e6e6",       # button background
+    "btn_fg": "#222222",       # button text
+    "btn_active_bg": "#d9d9d9",# button active background
+    "btn_active_fg": "#000000",# button active text
+    "btn_disabled_fg": "#999999", # button disabled fg
+    "canvas_bg": "white",      # canvas background
+    "log_bg": "#fafafa",       # log box background
+    "log_fg": "#333333",       # log box text
+    "insert_bg": "#000000",    # caret color in text widgets
+}
+
+def _btn_style():
+    return {
+        "bg": PALETTE["btn_bg"],
+        "fg": PALETTE["btn_fg"],
+        "activebackground": PALETTE["btn_active_bg"],
+        "activeforeground": PALETTE["btn_active_fg"],
+        "disabledforeground": PALETTE["btn_disabled_fg"],
+    }
+
+# =========================
 # Angle profiles & helpers
 # =========================
 
@@ -1308,11 +1339,11 @@ def main():
     _root = TkinterDnD.Tk()
     _root.title("360 Video Dataset Preparation")
     _root.geometry("1280x900")
-    _root.configure(bg="black")
+    _root.configure(bg=PALETTE["bg"])
     _root.resizable(True, True)
 
     # ---------- Header ----------
-    header = Frame(_root, bg="black")
+    header = Frame(_root, bg=PALETTE["bg"])
     header.pack(pady=(14, 8))
 
     icon_path = Path(__file__).parent / "folder_icon.png"
@@ -1320,7 +1351,7 @@ def main():
         try:
             img = Image.open(icon_path).resize((84, 84))
             icon = ImageTk.PhotoImage(img)
-            icon_label = Label(header, image=icon, bg="black")
+            icon_label = Label(header, image=icon, bg=PALETTE["bg"])
             icon_label.image = icon
             icon_label.pack(side="left", padx=(0, 12))
         except Exception:
@@ -1330,18 +1361,26 @@ def main():
 
     Label(header,
           text="Insta360 Video(s) To Training Format Pipeline",
-          bg="black", fg="white", font=("Helvetica", 16, "bold")).pack(side="left")
+          bg=PALETTE["bg"], fg=PALETTE["fg"], font=("Helvetica", 16, "bold")).pack(side="left")
+
+    # Ensure any fallback icon labels inherited palette (handles inline-pack case)
+    try:
+        for _child in header.winfo_children():
+            if isinstance(_child, Label) and _child.cget("text") == "??":
+                _child.configure(bg=PALETTE["bg"], fg=PALETTE["fg"])
+    except Exception:
+        pass
 
     # ---------- Controls ----------
-    ctrl = Frame(_root, bg="black")
+    ctrl = Frame(_root, bg=PALETTE["bg"])
     ctrl.pack(pady=(8, 2))
 
-    Label(ctrl, text="Extract 1 frame per", bg="black", fg="white").pack(side="left")
+    Label(ctrl, text="Extract 1 frame per", bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(side="left")
 
     frame_interval = StringVar(value="1")
     Entry(ctrl, textvariable=frame_interval, width=6).pack(side="left", padx=(6, 6))
 
-    Label(ctrl, text="seconds", bg="black", fg="white").pack(side="left", padx=(0, 16))
+    Label(ctrl, text="seconds", bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(side="left", padx=(0, 16))
 
     use_masking = BooleanVar(value=False)
     mcb = Checkbutton(
@@ -1349,8 +1388,8 @@ def main():
         text="Enable Masking (removes user from frames)",
         variable=use_masking,
         onvalue=True, offvalue=False,
-        bg="black", fg="white", activebackground="black",
-        selectcolor="black",
+        bg=PALETTE["bg"], fg=PALETTE["fg"], activebackground=PALETTE["bg"],
+        selectcolor=PALETTE["bg"],
     )
     mcb.pack(side="left")
 
@@ -1361,15 +1400,15 @@ def main():
         text="Export XMP for RealityCapture",
         variable=export_rc_xmp,
         onvalue=True, offvalue=False,
-        bg="black", fg="white", activebackground="black",
-        selectcolor="black",
+        bg=PALETTE["bg"], fg=PALETTE["fg"], activebackground=PALETTE["bg"],
+        selectcolor=PALETTE["bg"],
     )
     xmp_cb.pack(side="left", padx=(12,0))
 
     # ---------- Drop zone ----------
     drop_zone = Label(
         _root, text="Drop Folder With Insta360 Videos Here",
-        bg="#222", fg="white", width=70, height=6,
+        bg=PALETTE["drop_bg"], fg=PALETTE["fg"], width=70, height=6,
         relief="ridge", bd=2
     )
     drop_zone.pack(pady=10)
@@ -1377,8 +1416,8 @@ def main():
     drop_zone.dnd_bind('<<Drop>>', on_drop)
 
     # ---------- Buttons ----------
-    btn_style = {"bg":"#333","fg":"white","activebackground":"#444","activeforeground":"white","disabledforeground":"#888"}
-    btns = Frame(_root, bg="black")
+    btn_style = _btn_style()
+    btns = Frame(_root, bg=PALETTE["bg"])
     btns.pack()
     browse_btn = Button(btns, text="Browse", command=browse_folder, **btn_style)
     browse_btn.pack(side="left", padx=6)
@@ -1386,36 +1425,36 @@ def main():
     last_btn.pack(side="left", padx=6)
 
     # ---------- Progress ----------
-    prog = Frame(_root, bg="black")
+    prog = Frame(_root, bg=PALETTE["bg"])
     prog.pack(fill=BOTH, padx=16, pady=(12, 4))
 
     # Label(prog, text="Overall Progress", bg="black", fg="#ccc").pack(anchor="w")
     # progress_main = ttk.Progressbar(prog, orient="horizontal", mode="determinate", length=680)
     # progress_main.pack(pady=(2, 8))
 
-    Label(prog, text="Current Task", bg="black", fg="#ccc").pack(anchor="w")
+    Label(prog, text="Current Task", bg=PALETTE["bg"], fg=PALETTE["muted_fg"]).pack(anchor="w")
     progress_sub = ttk.Progressbar(prog, orient="horizontal", mode="determinate", length=680)
     progress_sub.pack(pady=(2, 8))
 
     status_var = StringVar(value="Idle.")
-    Label(_root, textvariable=status_var, bg="black", fg="white").pack(pady=(0, 6))
+    Label(_root, textvariable=status_var, bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(pady=(0, 6))
 
     # ---------- Time Range ----------
-    range_frame = Frame(_root, bg="black")
+    range_frame = Frame(_root, bg=PALETTE["bg"])
     range_frame.pack(pady=(6, 2))
 
-    start_lbl = Label(range_frame, text="Start (hh:mm:ss)", bg="black", fg="white")
+    start_lbl = Label(range_frame, text="Start (hh:mm:ss)", bg=PALETTE["bg"], fg=PALETTE["fg"])
     start_lbl.pack(side="left", padx=(0, 6))
     start_time_var = StringVar(value="")
     Entry(range_frame, textvariable=start_time_var, width=10).pack(side="left", padx=(0, 16))
 
-    end_lbl = Label(range_frame, text="End (hh:mm:ss)", bg="black", fg="white")
+    end_lbl = Label(range_frame, text="End (hh:mm:ss)", bg=PALETTE["bg"], fg=PALETTE["fg"])
     end_lbl.pack(side="left", padx=(0, 6))
     end_time_var = StringVar(value="")
     Entry(range_frame, textvariable=end_time_var, width=10).pack(side="left")
 
     # ---------- Stage Controls ----------
-    stage_btns = Frame(_root, bg="black")
+    stage_btns = Frame(_root, bg=PALETTE["bg"])
     stage_btns.pack(pady=(0, 12))
     split_btn = Button(stage_btns, text="START SPLITTING", state=DISABLED, command=on_start_split, **btn_style)
     split_btn.pack(side="left", padx=6)
@@ -1423,9 +1462,9 @@ def main():
     align_btn.pack(side="left", padx=6)
 
     # ---------- Log ----------
-    log_frame = Frame(_root, bg="black")
+    log_frame = Frame(_root, bg=PALETTE["bg"])
     log_frame.pack(fill=BOTH, expand=True, padx=16, pady=(0, 12))
-    log_text = Text(log_frame, height=6, bg="#111", fg="#ddd", insertbackground="white")
+    log_text = Text(log_frame, height=6, bg=PALETTE["log_bg"], fg=PALETTE["log_fg"], insertbackground=PALETTE["insert_bg"])
     log_text.pack(fill=BOTH)
     log_text.configure(state=DISABLED)
 
@@ -1435,37 +1474,37 @@ def main():
     tabs.pack(fill=BOTH, expand=True, padx=16, pady=(8, 6))
 
     # Preview tab
-    preview_tab = Frame(tabs, bg="black")
+    preview_tab = Frame(tabs, bg=PALETTE["bg"])
     tabs.add(preview_tab, text="Preview")
 
-    prev_ctrl = Frame(preview_tab, bg="black")
+    prev_ctrl = Frame(preview_tab, bg=PALETTE["bg"])
     prev_ctrl.pack(fill=BOTH, pady=(4, 6))
-    Label(prev_ctrl, text="Preview time (HH:MM:SS)", bg="black", fg="white").pack(side="left")
+    Label(prev_ctrl, text="Preview time (HH:MM:SS)", bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(side="left")
     Entry(prev_ctrl, textvariable=preview_time_var, width=10).pack(side="left", padx=(6, 12))
     Button(prev_ctrl, text="Compute views", command=_on_compute_views).pack(side="left")
 
     # 3x3 preview grid
     global preview_grid
-    preview_wrap = Frame(preview_tab, bg="black")
+    preview_wrap = Frame(preview_tab, bg=PALETTE["bg"])
     preview_wrap.pack(fill=BOTH, pady=(6, 12))
     global preview_canvas
-    preview_canvas = Canvas(preview_wrap, bg="black", highlightthickness=0, height=500)
+    preview_canvas = Canvas(preview_wrap, bg=PALETTE["canvas_bg"], highlightthickness=0, height=500)
     preview_canvas.pack(side="left", fill=BOTH, expand=True)
     global preview_grid, hscroll, vscroll
-    preview_grid = Frame(preview_canvas, bg="black")
+    preview_grid = Frame(preview_canvas, bg=PALETTE["bg"])
     preview_canvas.create_window((0, 0), window=preview_grid, anchor="nw")
 
     # Overlays tab
-    overlays_tab = Frame(tabs, bg="black")
+    overlays_tab = Frame(tabs, bg=PALETTE["bg"])
     tabs.add(overlays_tab, text="Overlays")
 
-    ov_ctrl = Frame(overlays_tab, bg="black")
+    ov_ctrl = Frame(overlays_tab, bg=PALETTE["bg"])
     ov_ctrl.pack(fill=BOTH, pady=(4, 6))
-    Label(ov_ctrl, text="Uses Preview time", bg="black", fg="#ccc").pack(side="left", padx=(0, 12))
+    Label(ov_ctrl, text="Uses Preview time", bg=PALETTE["bg"], fg=PALETTE["muted_fg"]).pack(side="left", padx=(0, 12))
     Button(ov_ctrl, text="Refresh Overlays", command=_on_refresh_overlays).pack(side="left")
 
     global overlay_canvas
-    overlay_canvas = Canvas(overlays_tab, bg="black", highlightthickness=0, height=520)
+    overlay_canvas = Canvas(overlays_tab, bg=PALETTE["canvas_bg"], highlightthickness=0, height=520)
     overlay_canvas.pack(fill=BOTH, expand=True, pady=(6, 12))
 
     refresh_action_buttons()
