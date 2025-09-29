@@ -10,10 +10,10 @@ from typing import NamedTuple
 import math
 
 from tkinter import (
-    Label, Entry, StringVar, DoubleVar, Frame, Checkbutton, BooleanVar,
+    Tk, Label, Entry, StringVar, DoubleVar, Frame, Checkbutton, BooleanVar,
     filedialog, messagebox, Button, Text, Scale, Canvas, END, BOTH, DISABLED, NORMAL
 )
-from tkinterdnd2 import DND_FILES, TkinterDnD
+# Drag-and-drop dependency removed
 from tkinter import ttk
 from PIL import Image, ImageTk
 from time_range import normalize_time_range
@@ -123,7 +123,6 @@ use_masking = None
 frame_interval = None
 start_time_var = None
 end_time_var = None
-drop_zone = None
 browse_btn = None
 last_btn = None
 split_btn = None
@@ -630,14 +629,10 @@ def refresh_action_buttons():
 
 def ui_disable_inputs(disabled=True):
     if disabled:
-        if drop_zone is not None:
-            drop_zone.configure(state="disabled")
         for btn in (browse_btn, last_btn, split_btn, align_btn):
             if btn is not None:
                 btn.configure(state=DISABLED)
     else:
-        if drop_zone is not None:
-            drop_zone.configure(state="normal")
         if browse_btn is not None:
             browse_btn.configure(state=NORMAL)
         refresh_action_buttons()
@@ -1236,12 +1231,7 @@ def start_pipeline_with_path(folder_path: Path):
     refresh_action_buttons()
 
 
-def on_drop(event):
-    folder_path = Path(event.data.strip("{}"))
-    if folder_path.is_dir():
-        start_pipeline_with_path(folder_path)
-    else:
-        ui_log("[ERROR] Please drop a valid folder.")
+## Drag-and-drop handler removed
 
 
 def browse_folder():
@@ -1254,7 +1244,7 @@ def run_last():
     if _last_folder and Path(_last_folder).exists():
         start_pipeline_with_path(Path(_last_folder))
     else:
-        ui_log("[ERROR] No valid last folder. Please Browse or Drop a folder.")
+        ui_log("[ERROR] No valid last folder. Please use Browse.")
 
 
 def on_start_split():
@@ -1332,11 +1322,11 @@ def on_masking_toggle():
 
 def main():
     global _root, status_var, progress_sub, log_text
-    global use_masking, frame_interval, start_time_var, end_time_var, drop_zone, browse_btn, last_btn, split_btn, align_btn
+    global use_masking, frame_interval, start_time_var, end_time_var, browse_btn, last_btn, split_btn, align_btn
     global export_rc_xmp
     global yolo_model_path, yolo_conf, yolo_dilate_px, yolo_invert_mask, yolo_apply_to_rgb, _yolo_widgets
 
-    _root = TkinterDnD.Tk()
+    _root = Tk()
     _root.title("360 Video Dataset Preparation")
     _root.geometry("1280x900")
     _root.configure(bg=PALETTE["bg"])
@@ -1346,22 +1336,22 @@ def main():
     header = Frame(_root, bg=PALETTE["bg"])
     header.pack(pady=(14, 8))
 
-    icon_path = Path(__file__).parent / "folder_icon.png"
-    if icon_path.exists():
-        try:
-            img = Image.open(icon_path).resize((84, 84))
-            icon = ImageTk.PhotoImage(img)
-            icon_label = Label(header, image=icon, bg=PALETTE["bg"])
-            icon_label.image = icon
-            icon_label.pack(side="left", padx=(0, 12))
-        except Exception:
-            Label(header, text="📁", font=("Arial", 44), bg="black", fg="white").pack(side="left", padx=(0, 12))
-    else:
-        Label(header, text="📁", font=("Arial", 44), bg="black", fg="white").pack(side="left", padx=(0, 12))
+    # icon_path = Path(__file__).parent / "folder_icon.png"
+    # if icon_path.exists():
+    #     try:
+    #         img = Image.open(icon_path).resize((84, 84))
+    #         icon = ImageTk.PhotoImage(img)
+    #         icon_label = Label(header, image=icon, bg=PALETTE["bg"])
+    #         icon_label.image = icon
+    #         icon_label.pack(side="left", padx=(0, 12))
+    #     except Exception:
+    #         Label(header, text="📁", font=("Arial", 44), bg="black", fg="white").pack(side="left", padx=(0, 12))
+    # else:
+    #     Label(header, text="📁", font=("Arial", 44), bg="black", fg="white").pack(side="left", padx=(0, 12))
 
     Label(header,
-          text="Insta360 Video(s) To Training Format Pipeline",
-          bg=PALETTE["bg"], fg=PALETTE["fg"], font=("Helvetica", 16, "bold")).pack(side="left")
+          text="360 VIDEO PREPARATION TOOL",
+          bg=PALETTE["bg"], fg=PALETTE["fg"], font=("Arial", 12, "bold")).pack(side="left")
 
     # Ensure any fallback icon labels inherited palette (handles inline-pack case)
     try:
@@ -1370,6 +1360,15 @@ def main():
                 _child.configure(bg=PALETTE["bg"], fg=PALETTE["fg"])
     except Exception:
         pass
+
+    # ---------- Buttons ----------
+    btn_style = _btn_style()
+    btns = Frame(_root, bg=PALETTE["bg"])
+    btns.pack()
+    browse_btn = Button(btns, text="Browse", command=browse_folder, **btn_style)
+    browse_btn.pack(side="left", padx=6)
+    last_btn = Button(btns, text="Run Last Chosen Folder", state=DISABLED, command=run_last, **btn_style)
+    last_btn.pack(side="left", padx=6)
 
     # ---------- Controls ----------
     ctrl = Frame(_root, bg=PALETTE["bg"])
@@ -1385,7 +1384,7 @@ def main():
     use_masking = BooleanVar(value=False)
     mcb = Checkbutton(
         ctrl,
-        text="Enable Masking (removes user from frames)",
+        text="Enable Person Masking",
         variable=use_masking,
         onvalue=True, offvalue=False,
         bg=PALETTE["bg"], fg=PALETTE["fg"], activebackground=PALETTE["bg"],
@@ -1397,7 +1396,7 @@ def main():
     export_rc_xmp = BooleanVar(value=False)
     xmp_cb = Checkbutton(
         ctrl,
-        text="Export XMP for RealityCapture",
+        text="RC XMP Export XMP",
         variable=export_rc_xmp,
         onvalue=True, offvalue=False,
         bg=PALETTE["bg"], fg=PALETTE["fg"], activebackground=PALETTE["bg"],
@@ -1405,39 +1404,6 @@ def main():
     )
     xmp_cb.pack(side="left", padx=(12,0))
 
-    # ---------- Drop zone ----------
-    drop_zone = Label(
-        _root, text="Drop Folder With Insta360 Videos Here",
-        bg=PALETTE["drop_bg"], fg=PALETTE["fg"], width=70, height=6,
-        relief="ridge", bd=2
-    )
-    drop_zone.pack(pady=10)
-    drop_zone.drop_target_register(DND_FILES)
-    drop_zone.dnd_bind('<<Drop>>', on_drop)
-
-    # ---------- Buttons ----------
-    btn_style = _btn_style()
-    btns = Frame(_root, bg=PALETTE["bg"])
-    btns.pack()
-    browse_btn = Button(btns, text="Browse", command=browse_folder, **btn_style)
-    browse_btn.pack(side="left", padx=6)
-    last_btn = Button(btns, text="Run Last Chosen Folder", state=DISABLED, command=run_last, **btn_style)
-    last_btn.pack(side="left", padx=6)
-
-    # ---------- Progress ----------
-    prog = Frame(_root, bg=PALETTE["bg"])
-    prog.pack(fill=BOTH, padx=16, pady=(12, 4))
-
-    # Label(prog, text="Overall Progress", bg="black", fg="#ccc").pack(anchor="w")
-    # progress_main = ttk.Progressbar(prog, orient="horizontal", mode="determinate", length=680)
-    # progress_main.pack(pady=(2, 8))
-
-    Label(prog, text="Current Task", bg=PALETTE["bg"], fg=PALETTE["muted_fg"]).pack(anchor="w")
-    progress_sub = ttk.Progressbar(prog, orient="horizontal", mode="determinate", length=680)
-    progress_sub.pack(pady=(2, 8))
-
-    status_var = StringVar(value="Idle.")
-    Label(_root, textvariable=status_var, bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(pady=(0, 6))
 
     # ---------- Time Range ----------
     range_frame = Frame(_root, bg=PALETTE["bg"])
@@ -1460,7 +1426,21 @@ def main():
     split_btn.pack(side="left", padx=6)
     align_btn = Button(stage_btns, text="START ALIGNING", state=DISABLED, command=on_start_align, **btn_style)
     align_btn.pack(side="left", padx=6)
+    
+    # ---------- Progress ----------
+    prog = Frame(_root, bg=PALETTE["bg"])
+    prog.pack(fill=BOTH, padx=16, pady=(12, 4))
 
+    # Label(prog, text="Overall Progress", bg="black", fg="#ccc").pack(anchor="w")
+    # progress_main = ttk.Progressbar(prog, orient="horizontal", mode="determinate", length=680)
+    # progress_main.pack(pady=(2, 8))
+
+    Label(prog, text="Current Task", bg=PALETTE["bg"], fg=PALETTE["muted_fg"]).pack(anchor="w")
+    progress_sub = ttk.Progressbar(prog, orient="horizontal", mode="determinate", length=680)
+    progress_sub.pack(pady=(2, 8))
+
+    status_var = StringVar(value="Idle.")
+    Label(_root, textvariable=status_var, bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(pady=(0, 6))
     # ---------- Log ----------
     log_frame = Frame(_root, bg=PALETTE["bg"])
     log_frame.pack(fill=BOTH, expand=True, padx=16, pady=(0, 12))
