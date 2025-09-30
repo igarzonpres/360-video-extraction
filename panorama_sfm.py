@@ -252,6 +252,10 @@ def render_perspective_images(
     camera = pano_size = rays_in_cam = None
     # Collect mapping of image relative names to new-style mask absolute paths (optional consumers)
     mask_mappings = []
+    # Optional YOLO panorama masks directory (sibling of input pano dir)
+    yolo_pano_mask_dir = pano_image_dir.parent / "masks_YOLO"
+    yolo_colmap_dir = mask_dir.parent / "colmap_masks_yolo"
+
     for pano_name in tqdm(pano_image_names):
         pano_path = pano_image_dir / pano_name
         try:
@@ -342,6 +346,39 @@ def render_perspective_images(
             # Record mapping: image relative name (as used by COLMAP) -> mask absolute path (new-style only)
             mask_mappings.append((image_name, str(mask_path.resolve())))
 
+            # --- NEW: Split YOLO panorama mask into per-view mask if available ---
+            try:
+                out_mask_for_view = None
+                if yolo_pano_mask_dir.exists():
+                    yolo_src = yolo_pano_mask_dir / f"{Path(pano_name).stem}.mask.png"
+                    if yolo_src.exists():
+                        mgray = cv2.imread(str(yolo_src), cv2.IMREAD_GRAYSCALE)
+                        if mgray is not None:
+                            # Ensure mask matches panorama size before remap
+                            if mgray.shape[0] != pano_height or mgray.shape[1] != pano_width:
+                                mgray = cv2.resize(mgray, (pano_width, pano_height), interpolation=cv2.INTER_NEAREST)
+                            mview = cv2.remap(
+                                mgray,
+                                *np.moveaxis(xy_in_pano, -1, 0),
+                                cv2.INTER_NEAREST,
+                                borderMode=cv2.BORDER_WRAP,
+                            )
+                            # Binarize and combine with per-view coverage mask
+                            _, mview = cv2.threshold(mview, 127, 255, cv2.THRESH_BINARY)
+                            out_mask_for_view = cv2.bitwise_and(mask, mview)
+                # Write YOLO-split mask (or fallback to coverage mask) into colmap_masks_yolo
+                yolo_colmap_out = yolo_colmap_dir / f"{image_name}.png"
+                yolo_colmap_out.parent.mkdir(exist_ok=True, parents=True)
+                cv2.imwrite(str(yolo_colmap_out), out_mask_for_view if out_mask_for_view is not None else mask)
+            except Exception:
+                # On any failure, still write coverage mask to keep folder complete
+                try:
+                    yolo_colmap_out = yolo_colmap_dir / f"{image_name}.png"
+                    yolo_colmap_out.parent.mkdir(exist_ok=True, parents=True)
+                    cv2.imwrite(str(yolo_colmap_out), mask)
+                except Exception:
+                    pass
+
     # Write mask list file for optional consumers (not used by our pycolmap build)
     mask_list_path = mask_dir / "mask_list.txt"
     try:
@@ -404,11 +441,13 @@ def run(args):
     extraction_options.use_gpu = True
     extraction_options.gpu_index = "0"
 
-    # Use legacy mask_path pointing to output/colmap_masks for compatibility
+    # Prefer YOLO-split mask path if present; else legacy colmap_masks
+    mask_yolo_path = args.output_path / "colmap_masks_yolo"
+    mask_path = mask_yolo_path if mask_yolo_path.exists() else args.output_path / "colmap_masks"
     pycolmap.extract_features(
         database_path,
         image_dir,
-        reader_options={"mask_path": args.output_path / "colmap_masks"},
+        reader_options={"mask_path": mask_path},
         sift_options=extraction_options,
         camera_mode=pycolmap.CameraMode.PER_FOLDER,
     )

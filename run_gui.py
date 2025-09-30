@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 from typing import NamedTuple
 import math
+import re
 
 from tkinter import (
     Tk, Label, Entry, StringVar, DoubleVar, Frame, Checkbutton, BooleanVar,
@@ -186,12 +187,19 @@ def _list_frames_images_sorted(project_root: Path) -> list[Path]:
 
 _root = None
 status_var = None
+task_label_var = None
+cancel_event = None  # threading.Event to cancel long-running tasks
+_current_proc = None  # type: ignore  # active subprocess for cancellation
 # progress_main = None
 progress_sub = None
 log_text = None
 invert_panos_var = None  # GUI checkbox for 180 deg panorama inversion
 panorama_mode_var = None  # GUI checkbox to prefer frames over video
 video_mode_var = None     # GUI checkbox to force video mode (mutually exclusive)
+_stdout_redirect = None
+_stderr_redirect = None
+_orig_stdout = None
+_orig_stderr = None
 
 # Paths configured via Settings tab
 ffmpeg_path_var = None
@@ -246,6 +254,10 @@ _overlay_items = []  # canvas item ids to clear
 
 def ui_status(msg: str):
     status_var.set(msg)
+    try:
+        ui_log(msg)
+    except Exception:
+        pass
     _root.update_idletasks()
 
 def ui_log(msg: str):
@@ -428,6 +440,40 @@ class ModePill(Frame):
         c.create_arc(x2-2*r, y1, x2, y1+2*r, start=270, extent=180, style="pieslice", **kw)
         c.create_rectangle(x1+r, y1, x2-r, y2, **kw)
 
+
+class _TerminalWriter:
+    def __init__(self, prefix: str = "", underlying=None):
+        self._prefix = prefix
+        self._buffer = ""
+        self._underlying = underlying  # original stream to satisfy attrs
+
+    def write(self, data: str):
+        try:
+            s = str(data)
+            # Accumulate and flush on newlines
+            self._buffer += s
+            while "\n" in self._buffer:
+                line, self._buffer = self._buffer.split("\n", 1)
+                if line:
+                    ui_log(f"{self._prefix}{line}")
+        except Exception:
+            pass
+
+    def flush(self):
+        try:
+            if self._buffer:
+                ui_log(f"{self._prefix}{self._buffer}")
+                self._buffer = ""
+        except Exception:
+            pass
+
+    # Delegate unknown attributes/methods to the original stream so libraries expecting
+    # file-like interfaces (isatty, fileno, encoding, buffer, etc.) keep working.
+    def __getattr__(self, name):
+        if self._underlying is not None:
+            return getattr(self._underlying, name)
+        raise AttributeError(name)
+
 def _select_and_copy_panorama(project_root: Path, index_1based: int, dst_file: Path, context: str) -> bool:
     """Select a panorama by 1-based index (sorted by name) and copy to dst_file.
     Returns True on success.
@@ -446,6 +492,8 @@ def _select_and_copy_panorama(project_root: Path, index_1based: int, dst_file: P
         dst_file.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, dst_file)
         ui_status(f"Using panorama #{idx} for {context}.")
+        # Mirror status into terminal tab explicitly
+        ui_log(f"Using panorama number {idx} for {context}.")
         ui_log(f"[PANORAMA] {context}: #{idx} -> {dst_file}")
         return True
     except Exception as e:
@@ -754,6 +802,65 @@ class _FramesSubsetSwap:
         return False
 
 
+def _apply_yolo_masks_inplace(frames_root: Path, targets: Optional[list[Path]] = None) -> int:
+    """Apply YOLO masks to panorama frames in-place (black out person regions).
+    Masks are expected at frames_root.parent/"masks_YOLO"/<image>.mask.png.
+    If targets is provided, only those images (by filename) are processed; otherwise all .jpg in frames_root.
+    Returns number of images modified.
+    """
+    try:
+        import cv2  # type: ignore
+        import numpy as np  # type: ignore
+    except Exception:
+        ui_log("[WARN] OpenCV/Numpy not available to apply YOLO masks.")
+        return 0
+    masks_dir = frames_root.parent / "masks_YOLO"
+    if not masks_dir.exists():
+        ui_log("[INFO] No masks_YOLO folder found; skipping mask application.")
+        return 0
+    if targets is None:
+        images = sorted(frames_root.glob("*.jpg"))
+    else:
+        # Map to names present in frames_root
+        want = {p.name for p in targets}
+        images = [p for p in frames_root.glob("*.jpg") if p.name in want]
+    changed = 0
+    for img in images:
+        mask_path = masks_dir / f"{img.stem}.mask.png"
+        if not mask_path.exists():
+            continue
+        try:
+            bgr = cv2.imread(str(img), cv2.IMREAD_COLOR)
+            if bgr is None:
+                continue
+            mask = cv2.imread(str(mask_path), cv2.IMREAD_UNCHANGED)
+            if mask is None:
+                continue
+            # Ensure single-channel mask (H,W), uint8
+            if mask.ndim == 3:
+                # If mask has alpha or channels, take first channel
+                mask = mask[:, :, 0]
+            if mask.dtype != np.uint8:
+                mask = mask.astype(np.uint8)
+            h, w = bgr.shape[:2]
+            if mask.shape[0] != h or mask.shape[1] != w:
+                mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+            # Person = 0 (black) -> remove; background = 255 keep
+            to_remove = mask <= 127
+            if np.any(to_remove):
+                # Expand boolean mask to 3 channels safely
+                bgr[to_remove] = (0, 0, 0)
+                cv2.imwrite(str(img), bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+                changed += 1
+        except Exception as e:
+            ui_log(f"[WARN] Could not apply YOLO mask to {img.name}: {e}")
+    if changed > 0:
+        ui_log(f"[OK] Applied YOLO masks to {changed} panorama(s).")
+    else:
+        ui_log("[INFO] No YOLO masks applied (none matched selected images).")
+    return changed
+
+
 def _jpegtran_cmd(exe: str, src: Path, dst: Path) -> list[str]:
     # IJG jpegtran expects output via -outfile <dst> then <src>
     return [str(exe), "-rotate", "180", "-copy", "all", "-perfect", "-outfile", str(dst), str(src)]
@@ -898,7 +1005,8 @@ def _on_compute_views():
 
     # Render-only in preview directory
     ui_status("Rendering preview views...")
-    ui_sub_progress(indeterminate=True)
+    # Prepare determinate progress; we'll parse child output for totals
+    ui_sub_progress(0, indeterminate=False)
     try:
         run_ok = run_panorama_sfm(preview_root, render_only=True)
     finally:
@@ -1230,6 +1338,12 @@ def extract_frames_with_progress(video_dir: Path, interval_seconds: float, start
 
     total_vids = len(vids)
     for vid_idx, video_file in enumerate(vids, start=1):
+        try:
+            if cancel_event is not None and cancel_event.is_set():
+                ui_log("[CANCEL] Extraction cancelled by user.")
+                break
+        except Exception:
+            pass
         video_name = video_file.stem
 
         ui_status(f"Extracting frames: {video_file.name}")
@@ -1276,6 +1390,12 @@ def extract_frames_with_progress(video_dir: Path, interval_seconds: float, start
         while cap.isOpened():
             if frame_idx >= end_frame:
                 break
+            try:
+                if cancel_event is not None and cancel_event.is_set():
+                    ui_log("[CANCEL] Extraction cancelled by user.")
+                    break
+            except Exception:
+                pass
             ret, frame = cap.read()
             if not ret:
                 break
@@ -1366,6 +1486,12 @@ def run_yolo_masking(frames_root: Path) -> int:
     last_update = time.time()
 
     for i, img_path in enumerate(img_paths, 1):
+        try:
+            if cancel_event is not None and cancel_event.is_set():
+                ui_log("[CANCEL] Masking cancelled by user.")
+                break
+        except Exception:
+            pass
         try:
             bgr = load_bgr(img_path)
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
@@ -1550,8 +1676,8 @@ def run_panorama_sfm(project_root: Path, render_only: bool = False) -> bool:
     ui_log(f"[RUN] {' '.join(cmd)}")
     ui_status("Rendering images (render_only)" if render_only else "Running COLMAP pipeline...")
 
-    # Spin sub-progress as an activity indicator
-    ui_sub_progress(indeterminate=True)
+    # Prepare determinate progress; we'll parse child output
+    ui_sub_progress(0, indeterminate=False)
 
     try:
         import subprocess  # <-- keep only subprocess here
@@ -1565,13 +1691,53 @@ def run_panorama_sfm(project_root: Path, render_only: bool = False) -> bool:
             bufsize=1,
             universal_newlines=True
         ) as proc:
+            # Expose proc for cancellation
+            global _current_proc
+            _current_proc = proc
             if proc.stdout is not None:
+                total = None
+                done = None
                 for line in proc.stdout:
-                    ui_log(line.rstrip())
+                    # Cancellation check
+                    try:
+                        if cancel_event is not None and cancel_event.is_set():
+                            try:
+                                proc.terminate()
+                            except Exception:
+                                pass
+                            ui_log("[CANCEL] Stopping external process...")
+                            break
+                    except Exception:
+                        pass
+                    txt = line.rstrip()
+                    ui_log(txt)
+                    try:
+                        m = re.search(r"(\d+)\s*/\s*(\d+)", txt)
+                        if m:
+                            done = int(m.group(1))
+                            total = int(m.group(2)) if int(m.group(2)) > 0 else None
+                            if total:
+                                pct = max(0.0, min(100.0, 100.0 * done / float(total)))
+                                ui_sub_progress(pct, indeterminate=False)
+                                if task_label_var is not None:
+                                    left = max(0, total - done)
+                                    task_label_var.set(f"Rendering {done}/{total} ({left} left)")
+                    except Exception:
+                        pass
 
             ret = proc.wait()
 
         ui_sub_progress(100, indeterminate=False)
+        try:
+            if task_label_var is not None:
+                task_label_var.set("Current Task")
+        except Exception:
+            pass
+        finally:
+            try:
+                _current_proc = None
+            except Exception:
+                pass
 
         if ret == 0:
             ui_log("[OK] panorama_sfm finished.")
@@ -1686,8 +1852,10 @@ def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enable
     if panorama_mode_active:
         selected = _get_img_paths_for_masking(frames_root)
         with _FramesSubsetSwap(project_root, selected):
+            # Do not bake masks into panoramas; panorama_sfm will split YOLO masks per view.
             ok = run_panorama_sfm(project_root, render_only=True)
     else:
+        # Do not bake masks; panorama_sfm will split YOLO masks if present.
         ok = run_panorama_sfm(project_root, render_only=True)
     if not ok:
         ui_log("[ERROR] Rendering step failed. See log.")
@@ -1738,6 +1906,11 @@ def _stop_progress_bars():
 def _split_thread(project_root: Path, seconds_per_frame: float, masking_enabled: bool, start_seconds: int, end_seconds: Optional[int]) -> None:
     global _split_result
     try:
+        # Clear previous cancellations
+        try:
+            cancel_event.clear()
+        except Exception:
+            pass
     # remove preview folder before splitting
         preview_dir = project_root / "preview"
         if preview_dir.exists():
@@ -1764,11 +1937,19 @@ def _split_thread(project_root: Path, seconds_per_frame: float, masking_enabled:
         _stop_progress_bars()
         ui_disable_inputs(False)
         refresh_action_buttons()
+        try:
+            cancel_event.clear()
+        except Exception:
+            pass
 
 
 
 def _align_thread(split_result: SplitResult) -> None:
     try:
+        try:
+            cancel_event.clear()
+        except Exception:
+            pass
         ui_disable_inputs(True)
         ui_sub_progress(0, indeterminate=False)
         success = run_align_stage(split_result.project_root, split_result.video_count)
@@ -1782,6 +1963,10 @@ def _align_thread(split_result: SplitResult) -> None:
         _stop_progress_bars()
         ui_disable_inputs(False)
         refresh_action_buttons()
+        try:
+            cancel_event.clear()
+        except Exception:
+            pass
 
 
 
@@ -1922,7 +2107,9 @@ def on_start_align():
 
 def on_masking_toggle():
     try:
-        _ensure_preview_vars(reset_with_defaults=True)
+        # Do not reset sliders to presets when toggling masking;
+        # keep user-adjusted yaw/pitch values intact.
+        _ensure_preview_vars(reset_with_defaults=False)
     except Exception:
         pass
 
@@ -2026,7 +2213,9 @@ def main():
     # Current Task progress just below browse buttons
     prog_top = Frame(_root, bg=PALETTE["bg"])
     prog_top.pack(fill=BOTH, padx=16, pady=(8, 4))
-    Label(prog_top, text="Current Task", bg=PALETTE["bg"], fg=PALETTE["muted_fg"]).pack(anchor="w")
+    global task_label_var
+    task_label_var = StringVar(value="Current Task")
+    Label(prog_top, textvariable=task_label_var, bg=PALETTE["bg"], fg=PALETTE["muted_fg"]).pack(anchor="w")
     progress_sub = ttk.Progressbar(prog_top, orient="horizontal", mode="determinate", length=680)
     progress_sub.pack(pady=(2, 8))
 
@@ -2038,8 +2227,7 @@ def main():
     
     # ---------- Progress moved into Splitting tab ----------
 
-    status_var = StringVar(value="Idle.")
-    Label(_root, textvariable=status_var, bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(pady=(0, 6))
+    status_var = StringVar(value="")  # status shown only in Terminal now
 
     # Preset toggle moved to Settings tab
 
@@ -2190,19 +2378,6 @@ def main():
     except Exception:
         pass
 
-    # Splitting tab (only stage buttons; settings moved to Settings > Photo/Video)
-    splitting_tab = Frame(tabs, bg=PALETTE["bg"])
-    tabs.add(splitting_tab, text="Splitting")
-
-    stage_btns = Frame(splitting_tab, bg=PALETTE["bg"])
-    stage_btns.pack(pady=(0, 12))
-    split_btn = Button(stage_btns, text="START SPLITTING", state=DISABLED, command=on_start_split, **btn_style)
-    split_btn.pack(side="left", padx=6)
-    align_btn = Button(stage_btns, text="START ALIGNING", state=DISABLED, command=on_start_align, **btn_style)
-    align_btn.pack(side="left", padx=6)
-
-    # (Progress bar is displayed at the top area)
-
     # Preview tab
     preview_tab = Frame(tabs, bg=PALETTE["bg"])
     tabs.add(preview_tab, text="Preview")
@@ -2269,12 +2444,43 @@ def main():
     overlay_canvas = Canvas(overlays_tab, bg=PALETTE["canvas_bg"], highlightthickness=0, height=520)
     overlay_canvas.pack(fill=BOTH, expand=True, pady=(6, 12))
 
-    # ---------- Log (moved below tabs to free space) ----------
-    log_frame = Frame(_root, bg=PALETTE["bg"])
-    log_frame.pack(fill=BOTH, expand=False, padx=16, pady=(0, 12))
-    log_text = Text(log_frame, height=6, bg=PALETTE["log_bg"], fg=PALETTE["log_fg"], insertbackground=PALETTE["insert_bg"])
-    log_text.pack(fill=BOTH)
+    # Splitting tab: big centered buttons
+    splitting_tab = Frame(tabs, bg=PALETTE["bg"])
+    tabs.add(splitting_tab, text="Splitting")
+
+    center_box = Frame(splitting_tab, bg=PALETTE["bg"], width=800, height=460)
+    center_box.pack(expand=True)
+    center_box.pack_propagate(False)
+    big_font = ("Arial", 14, "bold")
+    split_btn = Button(center_box, text="START SPLITTING", state=DISABLED, command=on_start_split, **btn_style, font=big_font, width=24, height=2)
+    split_btn.pack(pady=(0, 16))
+    align_btn = Button(center_box, text="START ALIGNING", state=DISABLED, command=on_start_align, **btn_style, font=big_font, width=24, height=2)
+    align_btn.pack()
+    # Cancel button
+    def _on_cancel():
+        try:
+            if cancel_event is not None:
+                cancel_event.set()
+            # Try to terminate external process if any
+            try:
+                if _current_proc is not None:
+                    _current_proc.terminate()
+            except Exception:
+                pass
+            ui_log("[CANCEL] Requested cancellation.")
+        except Exception:
+            pass
+    cancel_btn = Button(center_box, text="CANCEL", command=_on_cancel, bg="#d9534f", fg="white", activebackground="#c9302c", activeforeground="white", width=24, height=2)
+    cancel_btn.pack(pady=(24, 0))
+
+    # Terminal tab (last): full-screen log
+    terminal_tab = Frame(tabs, bg=PALETTE["bg"])
+    tabs.add(terminal_tab, text="Terminal")
+    log_text = Text(terminal_tab, bg=PALETTE["log_bg"], fg=PALETTE["log_fg"], insertbackground=PALETTE["insert_bg"])
+    log_text.pack(fill=BOTH, expand=True)
     log_text.configure(state=DISABLED)
+    # Note: Do NOT globally redirect sys.stdout/stderr to avoid breaking third-party imports (torch/ultralytics).
+    # All app logs already go to this Terminal via ui_log; child process output is streamed here too.
 
     refresh_action_buttons()
     # Ensure controls reflect current panorama mode state
