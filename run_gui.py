@@ -229,6 +229,13 @@ preview_canvas = None    # Canvas wrapper for scrollbars
 hscroll = None           # Horizontal scrollbar
 vscroll = None           # Vertical scrollbar
 preview_canvas_window_id = None  # Canvas window id for centering
+pano_start_index_var = None  # StringVar for panorama start index (1-based)
+pano_end_index_var = None    # StringVar for panorama end index (1-based)
+
+# References to show/hide Photo/Video controls
+pv_fv_row = None
+pv_range_row = None
+pano_range_row = None
 
 # =========================
 # Overlay globals (Overlays tab)
@@ -292,6 +299,7 @@ def _refresh_controls_for_panorama_mode():
             preview_time_entry.configure(state=DISABLED if panorama_mode_active else NORMAL)
     except Exception:
         pass
+    _refresh_pv_controls_visibility()
 
 def _update_panorama_mode_active_from_ui(log: bool = True):
     """Sync internal panorama_mode_active with UI checkbox and frames availability."""
@@ -329,6 +337,96 @@ def _update_panorama_mode_active_from_ui(log: bool = True):
         if log:
             ui_log("[INFO] Panorama Mode is ON. Frames take priority; preview time ignored." if panorama_mode_active else "[INFO] Panorama Mode is OFF. Using video-based workflow.")
     _refresh_controls_for_panorama_mode()
+
+def _refresh_pv_controls_visibility():
+    """Show video controls when in video mode; show panorama range when in panorama mode."""
+    try:
+        if panorama_mode_active:
+            if pv_fv_row is not None:
+                pv_fv_row.pack_forget()
+            if pv_range_row is not None:
+                pv_range_row.pack_forget()
+            if pano_range_row is not None:
+                pano_range_row.pack(anchor="w", fill=BOTH, pady=(2,8))
+        else:
+            if pano_range_row is not None:
+                pano_range_row.pack_forget()
+            if pv_fv_row is not None:
+                pv_fv_row.pack(anchor="w", fill=BOTH, pady=(2,2))
+            if pv_range_row is not None:
+                pv_range_row.pack(anchor="w", fill=BOTH, pady=(2,8))
+    except Exception:
+        pass
+
+
+# =========================
+# Custom UI widgets
+# =========================
+
+class ModePill(Frame):
+    """A simple two-position pill toggle (Video | Panorama) drawn on a Canvas.
+    Binds to a StringVar with values 'video' or 'panorama'.
+    """
+    def __init__(self, master, variable: StringVar, command=None, **kwargs):
+        super().__init__(master, bg=PALETTE["bg"], **kwargs)
+        self.variable = variable
+        self.command = command
+        self.height = 28
+        self.width = 200
+        self.pad = 3
+        self.canvas = Canvas(self, width=self.width, height=self.height,
+                             bg=PALETTE["bg"], highlightthickness=0)
+        self.canvas.pack()
+        # click regions: left=video, right=panorama
+        self.canvas.bind("<Button-1>", self._on_click)
+        try:
+            self.variable.trace_add("write", self._on_var_change)
+        except Exception:
+            pass
+        self._draw()
+
+    def _on_var_change(self, *args):
+        self._draw()
+
+    def _on_click(self, event):
+        mid = self.width / 2
+        sel = "video" if event.x < mid else "panorama"
+        try:
+            self.variable.set(sel)
+        except Exception:
+            pass
+        if callable(self.command):
+            self.command()
+
+    def _draw(self):
+        c = self.canvas
+        c.delete("all")
+        w, h, r, p = self.width, self.height, self.height // 2, self.pad
+        # Colors
+        base = PALETTE["btn_bg"]
+        text = PALETTE["btn_fg"]
+        active = PALETTE["btn_active_bg"]
+        # Outer pill
+        self._rounded_rect(c, p, p, w - p, h - p, r, fill=base, outline="#cccccc")
+        # Active half
+        val = None
+        try:
+            val = self.variable.get()
+        except Exception:
+            val = "video"
+        if val == "video":
+            self._rounded_rect(c, p, p, w/2, h - p, r, fill=active, outline="")
+        else:
+            self._rounded_rect(c, w/2, p, w - p, h - p, r, fill=active, outline="")
+        # Labels
+        c.create_text(w*0.25, h/2, text="Video", fill=text)
+        c.create_text(w*0.75, h/2, text="Panorama", fill=text)
+
+    def _rounded_rect(self, c: Canvas, x1, y1, x2, y2, r, **kw):
+        r = min(r, int((y2 - y1)/2))
+        c.create_arc(x1, y1, x1+2*r, y1+2*r, start=90, extent=180, style="pieslice", **kw)
+        c.create_arc(x2-2*r, y1, x2, y1+2*r, start=270, extent=180, style="pieslice", **kw)
+        c.create_rectangle(x1+r, y1, x2-r, y2, **kw)
 
 def _select_and_copy_panorama(project_root: Path, index_1based: int, dst_file: Path, context: str) -> bool:
     """Select a panorama by 1-based index (sorted by name) and copy to dst_file.
@@ -508,6 +606,152 @@ def _rotate_panoramas_in_dir(frames_root: Path) -> bool:
         ui_log(f"[OK] Inverted {ok_count}/{len(imgs)} panorama(s) with jpegtran.")
         return True
     return False
+
+
+def _get_img_paths_for_masking(frames_root: Path) -> list[Path]:
+    """Return list of .jpg images to process, optionally filtered by panorama start/end indices."""
+    try:
+        if panorama_mode_active:
+            project_root = frames_root.parent
+            imgs = [p for p in _list_frames_images_sorted(project_root) if p.suffix.lower() == ".jpg"]
+            if not imgs:
+                return []
+            # Parse indices
+            def _parse_int(var) -> int | None:
+                try:
+                    s = var.get().strip() if var is not None else ""
+                    if s == "":
+                        return None
+                    return int(s)
+                except Exception:
+                    return None
+            start_idx = _parse_int(pano_start_index_var)  # 1-based
+            end_idx = _parse_int(pano_end_index_var)      # 1-based
+            n = len(imgs)
+            # Clamp and derive slice (Python slice end-exclusive)
+            if start_idx is None and end_idx is None:
+                sel = imgs
+            else:
+                s = 1 if start_idx is None else max(1, min(n, start_idx))
+                e = n if end_idx is None else max(1, min(n, end_idx))
+                if e < s:
+                    s, e = e, s
+                sel = imgs[s - 1:e]
+            ui_log(f"[PANORAMA] Processing {len(sel)}/{len(imgs)} panoramas (range)")
+            return sel
+        else:
+            # Video mode: process all jpg frames
+            return sorted(frames_root.glob("*.jpg"))
+    except Exception as e:
+        ui_log(f"[WARN] Failed to resolve image list: {e}")
+        return sorted(frames_root.glob("*.jpg"))
+
+
+def _rotate_specific_panoramas(imgs: list[Path]) -> bool:
+    """Rotate only the provided .jpg panoramas by 180 using jpegtran.
+    Returns True if at least one succeeded.
+    """
+    if not imgs:
+        return False
+    exe = _resolve_jpegtran_exe()
+    if not exe:
+        ui_log("[WARN] jpegtran not configured or not found. Set it under Settings > jpegtran.exe path.")
+        try:
+            messagebox.showwarning("jpegtran missing", "jpegtran.exe not found. Set it in the Settings tab or add to PATH. Continuing without inversion.")
+        except Exception:
+            pass
+        return False
+    ok_count = 0
+    for src in imgs:
+        if not src.exists() or src.suffix.lower() != ".jpg":
+            continue
+        try:
+            tmp = src.with_suffix(".rot180.jpg")
+            cmd = _jpegtran_cmd(exe, src, tmp)
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if proc.returncode == 0 and tmp.exists():
+                try:
+                    tmp.replace(src)
+                except Exception:
+                    _shutil.move(str(tmp), str(src))
+                ok_count += 1
+            else:
+                try:
+                    err = proc.stderr.decode(errors='ignore') if proc.stderr is not None else ''
+                except Exception:
+                    err = ''
+                ui_log(f"[WARN] jpegtran failed for {src.name}: {err[:200]}")
+                if tmp.exists():
+                    try:
+                        tmp.unlink()
+                    except Exception:
+                        pass
+        except Exception as e:
+            ui_log(f"[WARN] jpegtran error for {src.name}: {e}")
+    if ok_count > 0:
+        ui_log(f"[OK] Inverted {ok_count}/{len(imgs)} selected panorama(s) with jpegtran.")
+        return True
+    return False
+
+
+class _FramesSubsetSwap:
+    """Context-like helper to temporarily replace project_root/frames with a subset.
+    Copies selected images into a temporary frames directory and restores afterward.
+    """
+    def __init__(self, project_root: Path, selected_imgs: list[Path]):
+        self.project_root = project_root
+        self.selected = selected_imgs
+        self.frames_dir = project_root / "frames"
+        self.backup_dir = project_root / "frames.__all__"
+        self.temp_dir = project_root / "frames.__selected__"
+        self.active = False
+
+    def __enter__(self):
+        try:
+            # If selection covers all, skip swap
+            all_jpgs = sorted(self.frames_dir.glob("*.jpg"))
+            if len(self.selected) == len(all_jpgs) and set(map(str, self.selected)) == set(map(str, all_jpgs)):
+                return self
+            # Prepare temp selected dir
+            if self.temp_dir.exists():
+                shutil.rmtree(self.temp_dir)
+            self.temp_dir.mkdir(parents=True, exist_ok=True)
+            # Copy selected items
+            for src in self.selected:
+                dst = self.temp_dir / src.name
+                try:
+                    shutil.copyfile(src, dst)
+                except Exception as e:
+                    ui_log(f"[WARN] Failed to copy {src.name} into selection: {e}")
+            # Backup original frames and swap
+            if self.backup_dir.exists():
+                shutil.rmtree(self.backup_dir)
+            self.frames_dir.replace(self.backup_dir)
+            self.temp_dir.replace(self.frames_dir)
+            self.active = True
+            ui_log(f"[INFO] Using selected subset of panoramas: {len(self.selected)} item(s)")
+        except Exception as e:
+            ui_log(f"[WARN] Could not prepare frames subset: {e}")
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if self.active:
+                # Restore original frames
+                if self.frames_dir.exists():
+                    shutil.rmtree(self.frames_dir)
+                self.backup_dir.replace(self.frames_dir)
+                self.active = False
+            # Cleanup temp dir if left
+            if self.temp_dir.exists():
+                shutil.rmtree(self.temp_dir)
+            # Cleanup backup dir if something went wrong
+            if self.backup_dir.exists() and self.frames_dir.exists() and not self.active:
+                # Both present means restore done; keep backup removed
+                shutil.rmtree(self.backup_dir)
+        except Exception as e:
+            ui_log(f"[WARN] Failed to restore frames directory: {e}")
+        return False
 
 
 def _jpegtran_cmd(exe: str, src: Path, dst: Path) -> list[str]:
@@ -1105,7 +1349,7 @@ def run_yolo_masking(frames_root: Path) -> int:
         out = cv2.dilate(mask, k, iterations=iters) if grow_px > 0 else cv2.erode(mask, k, iterations=iters)
         return (out > 0)
 
-    img_paths = sorted(frames_root.glob("*.jpg"))
+    img_paths = _get_img_paths_for_masking(frames_root)
     if not img_paths:
         ui_log(f"[WARN] No .jpg frames found in {frames_root}")
         return 0
@@ -1224,7 +1468,7 @@ def run_yolo_masking(frames_root: Path) -> int:  # type: ignore[override]
         out = cv2.dilate(mask, k, iterations=iters) if grow_px > 0 else cv2.erode(mask, k, iterations=iters)
         return (out > 0)
 
-    img_paths = sorted(frames_root.glob("*.jpg"))
+    img_paths = _get_img_paths_for_masking(frames_root)
     if not img_paths:
         ui_log(f"[WARN] No .jpg frames found in {frames_root}")
         return 0
@@ -1414,7 +1658,11 @@ def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enable
         inv = False
     if inv:
         ui_status("Inverting panoramas with jpegtran...")
-        ok_inv = _rotate_panoramas_in_dir(frames_root)
+        if panorama_mode_active:
+            selected = _get_img_paths_for_masking(frames_root)
+            ok_inv = _rotate_specific_panoramas(selected)
+        else:
+            ok_inv = _rotate_panoramas_in_dir(frames_root)
         if not ok_inv:
             ui_log("[INFO] Proceeding without inversion (jpegtran missing or failed).")
 
@@ -1435,7 +1683,12 @@ def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enable
     # ui_main_progress(33, indeterminate=False)
     # Render perspective images/masks (pre-indexing) via COLMAP wrapper
     ui_status("Rendering perspective images from panoramas...")
-    ok = run_panorama_sfm(project_root, render_only=True)
+    if panorama_mode_active:
+        selected = _get_img_paths_for_masking(frames_root)
+        with _FramesSubsetSwap(project_root, selected):
+            ok = run_panorama_sfm(project_root, render_only=True)
+    else:
+        ok = run_panorama_sfm(project_root, render_only=True)
     if not ok:
         ui_log("[ERROR] Rendering step failed. See log.")
         return SplitResult(project_root, seconds_per_frame, masking_enabled, video_count)
@@ -1717,6 +1970,7 @@ def main():
     global invert_panos_var
     global panorama_mode_var
     global video_mode_var
+    global mode_var
     global ffmpeg_path_var, jpegtran_path_var
     global preview_pano_index_var
     global yolo_model_path, yolo_conf, yolo_dilate_px, yolo_invert_mask, yolo_apply_to_rgb, _yolo_widgets
@@ -1846,32 +2100,61 @@ def main():
     pv_group.pack(fill=BOTH)
 
     modes_row = Frame(pv_group, bg=PALETTE["bg"]) ; modes_row.pack(anchor="w", fill=BOTH)
-    panorama_mode_var = BooleanVar(value=False)
-    Checkbutton(modes_row, text="Panorama Mode (use frames/)", variable=panorama_mode_var,
-                onvalue=True, offvalue=False, bg=PALETTE["bg"], fg=PALETTE["fg"],
-                activebackground=PALETTE["bg"], selectcolor=PALETTE["bg"],
-                command=_on_panorama_mode_toggle).pack(side="left", padx=(16,12), pady=2)
+    # Switch-like mode selector (Video | Panorama)
+    Label(modes_row, text="Mode:", bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(side="left", padx=(16,8))
     global video_mode_var
     video_mode_var = BooleanVar(value=True)
-    Checkbutton(modes_row, text="Video Mode", variable=video_mode_var,
-                onvalue=True, offvalue=False, bg=PALETTE["bg"], fg=PALETTE["fg"],
-                activebackground=PALETTE["bg"], selectcolor=PALETTE["bg"],
-                command=_on_video_mode_toggle).pack(side="left", padx=(0,12), pady=2)
+    global panorama_mode_var
+    panorama_mode_var = BooleanVar(value=False)
+    global mode_var
+    mode_var = StringVar(value="video")
+    def _on_mode_changed():
+        try:
+            sel = mode_var.get()
+        except Exception:
+            sel = "video"
+        try:
+            video_mode_var.set(sel == "video")
+            panorama_mode_var.set(sel == "panorama")
+        except Exception:
+            pass
+        # Apply with availability checks
+        _update_panorama_mode_active_from_ui(log=True)
+        # If panorama not available, keep UI in sync (force video)
+        if not panorama_mode_active and sel == "panorama":
+            try:
+                mode_var.set("video")
+            except Exception:
+                pass
+    # Pill switch
+    ModePill(modes_row, variable=mode_var, command=_on_mode_changed).pack(side="left", padx=(0,12), pady=2)
 
-    # Frame extraction controls
-    fv_row = Frame(pv_group, bg=PALETTE["bg"]) ; fv_row.pack(anchor="w", fill=BOTH, pady=(2,2))
-    Label(fv_row, text="Extract 1 frame per", bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(side="left", padx=(16,6))
+    # Frame extraction controls (Video Mode)
+    global pv_fv_row, pv_range_row
+    pv_fv_row = Frame(pv_group, bg=PALETTE["bg"]) ; pv_fv_row.pack(anchor="w", fill=BOTH, pady=(2,2))
+    Label(pv_fv_row, text="Extract 1 frame per", bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(side="left", padx=(16,6))
     frame_interval = StringVar(value="1")
-    Entry(fv_row, textvariable=frame_interval, width=6).pack(side="left")
-    Label(fv_row, text="seconds", bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(side="left", padx=(6, 16))
+    Entry(pv_fv_row, textvariable=frame_interval, width=6).pack(side="left")
+    Label(pv_fv_row, text="seconds", bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(side="left", padx=(6, 16))
 
-    range_row = Frame(pv_group, bg=PALETTE["bg"]) ; range_row.pack(anchor="w", fill=BOTH, pady=(2,8))
-    Label(range_row, text="Start (hh:mm:ss)", bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(side="left", padx=(16,6))
+    pv_range_row = Frame(pv_group, bg=PALETTE["bg"]) ; pv_range_row.pack(anchor="w", fill=BOTH, pady=(2,8))
+    Label(pv_range_row, text="Start (hh:mm:ss)", bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(side="left", padx=(16,6))
     start_time_var = StringVar(value="")
-    Entry(range_row, textvariable=start_time_var, width=10).pack(side="left", padx=(0, 16))
-    Label(range_row, text="End (hh:mm:ss)", bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(side="left", padx=(0,6))
+    Entry(pv_range_row, textvariable=start_time_var, width=10).pack(side="left", padx=(0, 16))
+    Label(pv_range_row, text="End (hh:mm:ss)", bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(side="left", padx=(0,6))
     end_time_var = StringVar(value="")
-    Entry(range_row, textvariable=end_time_var, width=10).pack(side="left")
+    Entry(pv_range_row, textvariable=end_time_var, width=10).pack(side="left")
+
+    # Panorama range controls (Panorama Mode)
+    global pano_range_row, pano_start_index_var, pano_end_index_var
+    pano_range_row = Frame(pv_group, bg=PALETTE["bg"]) ; pano_range_row.pack_forget()
+    Label(pano_range_row, text="Panorama range (1-based):", bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(side="left", padx=(16,6))
+    Label(pano_range_row, text="Start #", bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(side="left")
+    pano_start_index_var = StringVar(value="")
+    Entry(pano_range_row, textvariable=pano_start_index_var, width=6).pack(side="left", padx=(4,16))
+    Label(pano_range_row, text="End #", bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(side="left")
+    pano_end_index_var = StringVar(value="")
+    Entry(pano_range_row, textvariable=pano_end_index_var, width=6).pack(side="left", padx=(4,0))
 
     # --- Software group ---
     sw_group = Frame(settings_tab, bg=PALETTE["bg"], highlightthickness=0)
@@ -1996,6 +2279,7 @@ def main():
     refresh_action_buttons()
     # Ensure controls reflect current panorama mode state
     _refresh_controls_for_panorama_mode()
+    _refresh_pv_controls_visibility()
 
     # initialize YOLO controls state
     on_masking_toggle()
