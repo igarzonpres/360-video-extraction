@@ -76,15 +76,26 @@ MASKING_PITCH_YAW_PAIRS = [
 MASKING_REF_IDX = 0
 
 # Without masking: your angles (ref at index 0)
+# NO_MASKING_PITCH_YAW_PAIRS = [
+#     (0, 90),   # Reference Pose (ref_idx = 0)
+#     (32, 0),
+#     (-42, 0),
+#     (0, 42),  # para la R1 usar 33, dejo el default para hacerlo compatible con la X5  
+#     (0, -25),
+#     (42, 180),
+#     (-32, 180),
+#     (0, 205),
+#     (0, 138), # para la R1 subirlo (142) para evitar que salga el hombro, dejo el default para hacerlo compatible con la X5
+# ]
 NO_MASKING_PITCH_YAW_PAIRS = [
     (0, 90),   # Reference Pose (ref_idx = 0)
-    (32, 0),
-    (-42, 0),
+    (25, 10),
+    (-30, 0),
     (0, 42),  # para la R1 usar 33, dejo el default para hacerlo compatible con la X5  
     (0, -25),
-    (42, 180),
-    (-32, 180),
-    (0, 205),
+    (30, 170),
+    (-25, 170),
+    (0, -170),
     (0, 138), # para la R1 subirlo (142) para evitar que salga el hombro, dejo el default para hacerlo compatible con la X5
 ]
 NO_MASKING_REF_IDX = 0
@@ -217,6 +228,7 @@ _pitch_vars: List[DoubleVar] | None = None  # per-view pitch
 preview_canvas = None    # Canvas wrapper for scrollbars
 hscroll = None           # Horizontal scrollbar
 vscroll = None           # Vertical scrollbar
+preview_canvas_window_id = None  # Canvas window id for centering
 
 # =========================
 # Overlay globals (Overlays tab)
@@ -540,10 +552,12 @@ def _refresh_preview_grid(preview_root: Path):
 
     out_dir = preview_root / "output"
     imgs = _collect_preview_images(out_dir)
-    # Build 1x9 horizontal strip
+    # Build 2-row layout: first 5 on top row, remaining 4 on bottom row
     for i, img_path in enumerate(imgs):
+        row = 0 if i < 5 else 1
+        col = i if i < 5 else (i - 5)
         cell = Frame(preview_grid, bg=PALETTE["bg"])
-        cell.grid(row=0, column=i, padx=4, pady=4, sticky="n")
+        cell.grid(row=row, column=col, padx=6, pady=6, sticky="n")
         if img_path and img_path.exists():
             try:
                 im = Image.open(img_path)
@@ -1710,6 +1724,10 @@ def main():
     _root = Tk()
     _root.title("360 Video Dataset Preparation")
     _root.geometry("1280x900")
+    try:
+        _root.state("zoomed")
+    except Exception:
+        pass
     _root.configure(bg=PALETTE["bg"])
     _root.resizable(True, True)
 
@@ -1768,12 +1786,6 @@ def main():
 
     status_var = StringVar(value="Idle.")
     Label(_root, textvariable=status_var, bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(pady=(0, 6))
-    # ---------- Log ----------
-    log_frame = Frame(_root, bg=PALETTE["bg"])
-    log_frame.pack(fill=BOTH, expand=True, padx=16, pady=(0, 12))
-    log_text = Text(log_frame, height=6, bg=PALETTE["log_bg"], fg=PALETTE["log_fg"], insertbackground=PALETTE["insert_bg"])
-    log_text.pack(fill=BOTH)
-    log_text.configure(state=DISABLED)
 
     # Preset toggle moved to Settings tab
 
@@ -1928,11 +1940,38 @@ def main():
     preview_wrap = Frame(preview_tab, bg=PALETTE["bg"])
     preview_wrap.pack(fill=BOTH, pady=(6, 12))
     global preview_canvas
-    preview_canvas = Canvas(preview_wrap, bg=PALETTE["canvas_bg"], highlightthickness=0, height=500)
+    preview_canvas = Canvas(preview_wrap, bg=PALETTE["canvas_bg"], highlightthickness=0, height=700)
     preview_canvas.pack(side="left", fill=BOTH, expand=True)
+    # Vertical scrollbar for preview grid
     global preview_grid, hscroll, vscroll
+    vscroll = ttk.Scrollbar(preview_wrap, orient="vertical", command=preview_canvas.yview)
+    vscroll.pack(side="right", fill="y")
+    preview_canvas.configure(yscrollcommand=vscroll.set)
     preview_grid = Frame(preview_canvas, bg=PALETTE["bg"])
-    preview_canvas.create_window((0, 0), window=preview_grid, anchor="nw")
+    global preview_canvas_window_id
+    preview_canvas_window_id = preview_canvas.create_window((0, 0), window=preview_grid, anchor="nw")
+    # Update scrollregion whenever content changes
+    def _on_preview_inner_configure(event=None):
+        try:
+            preview_canvas.configure(scrollregion=preview_canvas.bbox("all"))
+        except Exception:
+            pass
+        _center_preview_grid()
+    preview_grid.bind("<Configure>", _on_preview_inner_configure)
+    # Re-center when canvas size changes
+    def _on_preview_canvas_configure(event=None):
+        _center_preview_grid()
+    preview_canvas.bind("<Configure>", _on_preview_canvas_configure)
+
+    def _center_preview_grid():
+        try:
+            cw = preview_canvas.winfo_width()
+            iw = preview_grid.winfo_reqwidth()
+            x = max(0, int((cw - iw) / 2))
+            if preview_canvas_window_id is not None:
+                preview_canvas.coords(preview_canvas_window_id, x, 0)
+        except Exception:
+            pass
 
     # Overlays tab
     overlays_tab = Frame(tabs, bg=PALETTE["bg"])
@@ -1946,6 +1985,13 @@ def main():
     global overlay_canvas
     overlay_canvas = Canvas(overlays_tab, bg=PALETTE["canvas_bg"], highlightthickness=0, height=520)
     overlay_canvas.pack(fill=BOTH, expand=True, pady=(6, 12))
+
+    # ---------- Log (moved below tabs to free space) ----------
+    log_frame = Frame(_root, bg=PALETTE["bg"])
+    log_frame.pack(fill=BOTH, expand=False, padx=16, pady=(0, 12))
+    log_text = Text(log_frame, height=6, bg=PALETTE["log_bg"], fg=PALETTE["log_fg"], insertbackground=PALETTE["insert_bg"])
+    log_text.pack(fill=BOTH)
+    log_text.configure(state=DISABLED)
 
     refresh_action_buttons()
     # Ensure controls reflect current panorama mode state
