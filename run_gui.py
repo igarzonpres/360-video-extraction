@@ -64,15 +64,16 @@ def _btn_style():
 
 # With masking: your angles (ref at index 0)
 MASKING_PITCH_YAW_PAIRS = [
-    (0, 90),   # Reference Pose (ref_idx = 0)
-    (34, 0),
-    (-42, 0),
-    (0, 42),
-    (0, -42),
-    (42, 180),
-    (-34, 180),
-    (0, 222),
-    (0, 138),
+    (0, 145),   # Reference Pose (ref_idx = 0)
+    (0, 85),
+    (0, 25),
+    (0, -35),
+    (0, -95),
+    (0, -155),
+    (-25, 180),
+    (-25, 0),
+    (25, 180),
+    (25, 0),  # pano_camera10 extra view
 ]
 MASKING_REF_IDX = 0
 
@@ -89,15 +90,16 @@ MASKING_REF_IDX = 0
 #     (0, 138), # para la R1 subirlo (142) para evitar que salga el hombro, dejo el default para hacerlo compatible con la X5
 # ]
 NO_MASKING_PITCH_YAW_PAIRS = [
-    (0, 90),   # Reference Pose (ref_idx = 0)
-    (25, 10),
-    (-30, 0),
-    (0, 42),  # para la R1 usar 33, dejo el default para hacerlo compatible con la X5  
-    (0, -25),
-    (30, 170),
-    (-25, 170),
-    (0, -170),
-    (0, 138), # para la R1 subirlo (142) para evitar que salga el hombro, dejo el default para hacerlo compatible con la X5
+    (0, 145),   # Reference Pose (ref_idx = 0)
+    (0, 85),
+    (0, 25),
+    (0, -35),
+    (0, -95),
+    (0, -155),
+    (-25, 180),
+    (-25, 0),
+    (25, 180),
+    (25, 0),  # pano_camera10 extra view
 ]
 NO_MASKING_REF_IDX = 0
 
@@ -113,6 +115,7 @@ INVERTED_NO_MASKING_PITCH_YAW_PAIRS = [
     (-32, 0),
     (0, 0),
     (0, -42),
+    (10, 10),  # pano_camera10 extra view
 ]
 
 # Toggle flag controlled by the GUI button
@@ -514,7 +517,7 @@ def _apply_pairs_to_vars(pairs: List[Tuple[float, float]]):
     # Apply given (pitch, yaw) pairs to existing slider variables
     global _yaw_vars, _pitch_vars
     _ensure_preview_vars(reset_with_defaults=False)
-    for i in range(9):
+    for i in range(len(pairs)):
         p, y = pairs[i]
         _pitch_vars[i].set(float(p))
         _yaw_vars[i].set(float(y))
@@ -535,7 +538,8 @@ def _current_pairs() -> List[Tuple[float, float]]:
     global _yaw_vars, _pitch_vars
     if _yaw_vars is None or _pitch_vars is None:
         _ensure_preview_vars(reset_with_defaults=True)
-    return [(float(_pitch_vars[i].get()), float(_yaw_vars[i].get())) for i in range(9)]
+    n = min(len(_pitch_vars or []), len(_yaw_vars or []))
+    return [(float(_pitch_vars[i].get()), float(_yaw_vars[i].get())) for i in range(n)]
 
 
 def _write_rotation_override_for_dir(root_dir: Path):
@@ -661,7 +665,8 @@ def _get_img_paths_for_masking(frames_root: Path) -> list[Path]:
     try:
         if panorama_mode_active:
             project_root = frames_root.parent
-            imgs = [p for p in _list_frames_images_sorted(project_root) if p.suffix.lower() == ".jpg"]
+            allowed = {".jpg", ".jpeg", ".png"}
+            imgs = [p for p in _list_frames_images_sorted(project_root) if p.suffix.lower() in allowed]
             if not imgs:
                 return []
             # Parse indices
@@ -871,8 +876,14 @@ def _collect_preview_images(preview_out: Path) -> List[Path]:
     found: List[Path] = []
     if not images_root.exists():
         return found
-    # Expect images under pano_camera*/ subfolders; pick first image per view index 0..8
-    for idx in range(9):
+    # Expect images under pano_camera*/ subfolders; default 0..8, plus 10 if present
+    expected = _current_pairs()
+    indices: List[int]
+    if len(expected) >= 10:
+        indices = list(range(9)) + [10]
+    else:
+        indices = list(range(9))
+    for idx in indices:
         sub = images_root / f"pano_camera{idx}"
         if sub.exists():
             imgs = [p for p in sub.rglob("*.jpg")]
@@ -1474,9 +1485,15 @@ def run_yolo_masking(frames_root: Path) -> int:
         ui_log(f"[WARN] No .jpg frames found in {frames_root}")
         return 0
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    ui_log(f"[YOLO] Loading {model_name} on {device} â€¦")
+    # Force CPU usage; avoid torch.cuda device checks
+    device = "cpu"
+    device = "cpu"
+    ui_log(f"[YOLO] Loading {model_name} on {device}…")
     model = YOLO(model_name)  # auto-download if missing
+    try:
+        model.to(device)
+    except Exception:
+        pass
 
     total = len(img_paths)
     processed = 0
@@ -1505,7 +1522,7 @@ def run_yolo_masking(frames_root: Path) -> int:
                 imgsz=imgsz,
                 verbose=False,
                 classes=classes,
-                device=None       # let ultralytics choose (cuda if available)
+                device=device
             )
 
             # Default: if no person found, keep image as-is
@@ -1559,16 +1576,48 @@ def run_yolo_masking(frames_root: Path) -> int:  # type: ignore[override]
         Person = black (0), background = white (255)
     Returns number of masks written.
     """
+    # Force CPU usage for YOLO/Torch to avoid GPU issues
+    import os as _os
     try:
-        from ultralytics import YOLO
-        import numpy as np
-        import cv2
-        import torch
-        import time
+        _os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
     except Exception:
-        ui_log("[ERROR] YOLO/torch/OpenCV not available.")
-        ui_log("       pip install ultralytics opencv-python torch torchvision torchaudio")
+        pass
+
+    # Import dependencies with detailed diagnostics
+    import sys as _sys
+    import importlib
+    missing: dict[str, str] = {}
+    modules = [
+        ("ultralytics", "YOLO"),  # also check class export
+        ("cv2", None),
+        ("torch", None),
+        ("numpy", None),
+        ("time", None),
+    ]
+    refs: dict[str, object] = {}
+    for mod, attr in modules:
+        try:
+            m = importlib.import_module(mod)
+            if attr:
+                try:
+                    getattr(m, attr)
+                except Exception as e:
+                    missing[mod] = f"missing attribute {attr}: {e}"
+            refs[mod] = m
+        except Exception as e:
+            missing[mod] = str(e)
+    if missing:
+        ui_log("[ERROR] YOLO dependencies not available in this Python environment.")
+        ui_log(f"       Python: {_sys.executable}")
+        for mod, err in missing.items():
+            ui_log(f"       import {mod}: {err}")
+        ui_log("       Try: pip install ultralytics opencv-python torch torchvision torchaudio")
         return 0
+    from ultralytics import YOLO  # type: ignore
+    import numpy as np  # type: ignore
+    import cv2  # type: ignore
+    import torch  # type: ignore
+    import time  # type: ignore
 
     # --- Fixed parameters ---
     model_name = "yolov8x-seg.pt"
@@ -1602,9 +1651,13 @@ def run_yolo_masking(frames_root: Path) -> int:  # type: ignore[override]
     masks_dir = frames_root.parent / "masks_YOLO"
     masks_dir.mkdir(parents=True, exist_ok=True)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    ui_log(f"[YOLO] Loading {model_name} on {device} â€¦")
+    device = "cpu"
+    ui_log(f"[YOLO] Loading {model_name} on {device}…")
     model = YOLO(model_name)
+    try:
+        model.to(device)
+    except Exception:
+        pass
 
     total = len(img_paths)
     processed = 0
@@ -1626,7 +1679,7 @@ def run_yolo_masking(frames_root: Path) -> int:  # type: ignore[override]
                 imgsz=imgsz,
                 verbose=False,
                 classes=classes,
-                device=None
+                device=device
             )
 
             person_bool = np.zeros((h, w), dtype=bool)  # default no person
@@ -1860,6 +1913,9 @@ def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enable
     if not ok:
         ui_log("[ERROR] Rendering step failed. See log.")
         return SplitResult(project_root, seconds_per_frame, masking_enabled, video_count)
+    # Non-destructive copy of images and yolo masks into masked_images
+    ui_status("Building masked_images …")
+    merge_masked_images(project_root)
     return SplitResult(
         project_root=project_root,
         seconds_per_frame=seconds_per_frame,
@@ -1891,6 +1947,53 @@ def run_align_stage(project_root: Path, video_count: int) -> bool:
     ui_status("All done.")
     ui_log("[DONE] Pipeline complete.")
     return True
+
+# =========================
+# Merge masked_images helper
+# =========================
+
+def merge_masked_images(project_root: Path) -> bool:
+    """Copy the contents of output/images and output/colmap_masks_yolo into
+    output/masked_images, preserving subfolders and filenames. Non-destructive.
+    """
+    try:
+        out_root = Path(project_root) / "output"
+        images_root = out_root / "images"
+        masks_root = out_root / "colmap_masks_yolo"
+        dest_root = out_root / "masked_images"
+
+        def _copy_tree(src_root: Path) -> int:
+            count = 0
+            if not src_root.exists():
+                return 0
+            for p in src_root.rglob("*"):
+                if p.is_dir():
+                    continue
+                rel = p.relative_to(src_root)
+                dst = dest_root / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if not dst.exists():
+                    try:
+                        shutil.copy2(p, dst)
+                        count += 1
+                    except Exception as e:
+                        ui_log(f"[WARN] Could not copy {p} -> {dst}: {e}")
+                else:
+                    # Do not overwrite existing files; keep both sources intact
+                    pass
+            return count
+
+        dest_root.mkdir(parents=True, exist_ok=True)
+        c1 = _copy_tree(images_root)
+        c2 = _copy_tree(masks_root)
+        ui_log(f"[OK] Copied {c1} image(s) and {c2} mask file(s) into {dest_root}")
+        return True
+    except Exception as e:
+        try:
+            ui_log(f"[WARN] Failed to build masked_images: {e}")
+        except Exception:
+            pass
+        return False
 
 
 

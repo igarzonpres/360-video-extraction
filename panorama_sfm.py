@@ -194,7 +194,29 @@ def render_perspective_images(
         ref_idx = 0  # your current default
         logging.info(f"Using built-in get_virtual_rotations() (ref_idx={ref_idx}).")
 
+    # Append extra pano_camera10 view (pitch=10, yaw=10) when fewer than 10 views are configured
+    try:
+        if len(cams_from_pano_rotation) < 10:
+            extra_pitch, extra_yaw = 10.0, 10.0
+            cams_from_pano_rotation.append(
+                Rotation.from_euler("YX", [extra_yaw, extra_pitch], degrees=True).as_matrix()
+            )
+            try:
+                used_pairs.append((extra_pitch, extra_yaw))
+            except Exception:
+                pass
+            logging.info("Added extra pano_camera10 view (pitch=10, yaw=10).")
+    except Exception:
+        pass
+
     rig_config = create_pano_rig_config(cams_from_pano_rotation, ref_idx=ref_idx)
+
+    # Ensure the appended extra view is named 'pano_camera10/' for output consistency
+    try:
+        if len(rig_config.cameras) >= 10:
+            rig_config.cameras[-1].image_prefix = "pano_camera10/"
+    except Exception:
+        pass
 
     def write_rc_xmp_sidecar(image_path: Path, R_cam_from_world: np.ndarray, camera: pycolmap.Camera):
         """
@@ -365,18 +387,16 @@ def render_perspective_images(
                             )
                             # Binarize per-view YOLO mask (no intersection with coverage)
                             _, out_mask_for_view = cv2.threshold(mview, 127, 255, cv2.THRESH_BINARY)
-                # Write YOLO-split mask (or fallback to coverage mask) into colmap_masks_yolo
-                yolo_colmap_out = yolo_colmap_dir / f"{image_name}.png"
-                yolo_colmap_out.parent.mkdir(exist_ok=True, parents=True)
-                cv2.imwrite(str(yolo_colmap_out), out_mask_for_view if out_mask_for_view is not None else mask)
+                # Write YOLO-split mask into colmap_masks_yolo only if a YOLO mask was found
+                if out_mask_for_view is not None:
+                    # Write requested naming preserving original extension: <image_name>.mask.png
+                    _img_rel2 = Path(image_name)
+                    yolo_colmap_out2 = yolo_colmap_dir / _img_rel2.parent / f"{_img_rel2.name}.mask.png"
+                    yolo_colmap_out2.parent.mkdir(exist_ok=True, parents=True)
+                    cv2.imwrite(str(yolo_colmap_out2), out_mask_for_view)
             except Exception:
-                # On any failure, still write coverage mask to keep folder complete
-                try:
-                    yolo_colmap_out = yolo_colmap_dir / f"{image_name}.png"
-                    yolo_colmap_out.parent.mkdir(exist_ok=True, parents=True)
-                    cv2.imwrite(str(yolo_colmap_out), mask)
-                except Exception:
-                    pass
+                # Silently skip writing YOLO mask on failure; do not mix with coverage masks
+                pass
 
     # Write mask list file for optional consumers (not used by our pycolmap build)
     mask_list_path = mask_dir / "mask_list.txt"
@@ -440,9 +460,21 @@ def run(args):
     extraction_options.use_gpu = True
     extraction_options.gpu_index = "0"
 
-    # Prefer YOLO-split mask path if present; else legacy colmap_masks
+    # Prefer YOLO-split mask path only if it contains legacy-named masks (<image_name>.png);
+    # otherwise use legacy colmap_masks (since we now write .mask.png files for YOLO which COLMAP won't read by name)
     mask_yolo_path = args.output_path / "colmap_masks_yolo"
-    mask_path = mask_yolo_path if mask_yolo_path.exists() else args.output_path / "colmap_masks"
+    use_yolo = False
+    try:
+        if mask_yolo_path.exists():
+            # Select only if we find at least one legacy-named mask that COLMAP can read directly
+            for p in mask_yolo_path.rglob("*.png"):
+                name = str(p.name).lower()
+                if name.endswith(".jpg.png") or name.endswith(".jpeg.png") or name.endswith(".png.png"):
+                    use_yolo = True
+                    break
+    except Exception:
+        use_yolo = False
+    mask_path = mask_yolo_path if use_yolo else args.output_path / "colmap_masks"
     pycolmap.extract_features(
         database_path,
         image_dir,
