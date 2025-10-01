@@ -363,9 +363,8 @@ def render_perspective_images(
                                 cv2.INTER_NEAREST,
                                 borderMode=cv2.BORDER_WRAP,
                             )
-                            # Binarize and combine with per-view coverage mask
-                            _, mview = cv2.threshold(mview, 127, 255, cv2.THRESH_BINARY)
-                            out_mask_for_view = cv2.bitwise_and(mask, mview)
+                            # Binarize per-view YOLO mask (no intersection with coverage)
+                            _, out_mask_for_view = cv2.threshold(mview, 127, 255, cv2.THRESH_BINARY)
                 # Write YOLO-split mask (or fallback to coverage mask) into colmap_masks_yolo
                 yolo_colmap_out = yolo_colmap_dir / f"{image_name}.png"
                 yolo_colmap_out.parent.mkdir(exist_ok=True, parents=True)
