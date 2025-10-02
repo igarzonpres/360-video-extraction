@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-import os
+import os  # updated by feature: file tree/common output
 import sys
 import json
 import cv2
@@ -143,6 +143,21 @@ def open_in_explorer(path: Path) -> None:
 def list_videos(video_dir: Path):
     return sorted([p for p in video_dir.glob("*") if p.suffix.lower() in VALID_VIDEO_EXT])
 
+def list_subfolders_with_videos(root: Path) -> list[Path]:
+    try:
+        subs = [p for p in root.iterdir() if p.is_dir()]
+    except Exception:
+        return []
+    out: list[Path] = []
+    for d in subs:
+        try:
+            vids = list_videos(d)
+            if vids:
+                out.append(d)
+        except Exception:
+            pass
+    return sorted(out, key=lambda p: p.name.lower())
+
 
 def _is_two_to_one_image(path: Path, tol: float = 0.01) -> bool:
     try:
@@ -219,6 +234,42 @@ frame_interval = None
 start_time_var = None
 end_time_var = None
 browse_btn = None
+def get_output_base(project_root: Path) -> Path:
+    root = _resolve_common_output_root_from_var()
+    if not root:
+        return project_root
+    try:
+        mode = output_mode_var.get()
+    except Exception:
+        mode = "merge"
+    if mode == "separate":
+        return root / project_root.name
+    return root
+def _resolve_common_output_root_from_var() -> Optional[Path]:
+    try:
+        v = common_output_path_var.get().strip()
+    except Exception:
+        v = ""
+    if not v:
+        return None
+    p = Path(v)
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return p
+## Project browser state
+parent_folder = None  # type: Optional[Path]
+selected_subfolder = None  # type: Optional[Path]
+_tree = None  # type: Optional[ttk.Treeview]
+_left_panel = None  # type: Optional[Frame]
+_right_panel = None  # type: Optional[Frame]
+_select_parent_btn = None  # type: Optional[Button]
+_refresh_btn = None  # type: Optional[Button]
+
+# Common output settings
+common_output_path_var = None  # StringVar for path
+output_mode_var = None  # StringVar("merge"|"separate")
 last_btn = None
 split_btn = None
 align_btn = None
@@ -1916,6 +1967,10 @@ def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enable
     # Non-destructive copy of images and yolo masks into masked_images
     ui_status("Building masked_images …")
     merge_masked_images(project_root)
+    try:
+        mirror_outputs(project_root)
+    except Exception:
+        pass
     return SplitResult(
         project_root=project_root,
         seconds_per_frame=seconds_per_frame,
@@ -1933,6 +1988,11 @@ def run_align_stage(project_root: Path, video_count: int) -> bool:
     if not run_panorama_sfm(project_root):
         ui_status("COLMAP failed. See log.")
         return False
+    # Mirror outputs to common output root if configured (align start)
+    try:
+        mirror_outputs(project_root)
+    except Exception:
+        pass
 
     #ui_main_progress(66, indeterminate=False)
 
@@ -1943,10 +2003,47 @@ def run_align_stage(project_root: Path, video_count: int) -> bool:
         ui_log(f"[INFO] Multiple videos detected ({video_count}). Running segment_images...")
         run_segment_images(project_root)
 
+    # Mirror again after segmentation/deletion to reflect final state
+    try:
+        mirror_outputs(project_root)
+    except Exception:
+        pass
     #ui_main_progress(100, indeterminate=False)
     ui_status("All done.")
     ui_log("[DONE] Pipeline complete.")
     return True
+
+# Mirror the entire output folder to the configured common destination
+def mirror_outputs(project_root: Path) -> None:
+    try:
+        common_root_txt = common_output_path_var.get().strip() if common_output_path_var is not None else ""
+    except Exception:
+        common_root_txt = ""
+    if not common_root_txt:
+        return
+    try:
+        mode = output_mode_var.get() if output_mode_var is not None else "merge"
+    except Exception:
+        mode = "merge"
+    project_root = Path(project_root)
+    src_out = project_root / "output"
+    if not src_out.exists():
+        return
+    dst_base = Path(common_root_txt)
+    if mode == "separate":
+        dst_base = dst_base / project_root.name
+    dst_out = dst_base / "output"
+    ui_log(f"[SYNC] Mirroring outputs -> {dst_out}")
+    for p in src_out.rglob("*"):
+        if p.is_dir():
+            continue
+        rel = p.relative_to(src_out)
+        out = dst_out / rel
+        out.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(p, out)
+        except Exception as e:
+            ui_log(f"[WARN] Could not copy {p} -> {out}: {e}")
 
 # =========================
 # Merge masked_images helper
@@ -2128,6 +2225,51 @@ def start_pipeline_with_path(folder_path: Path):
 
 ## Drag-and-drop handler removed
 
+
+def _set_parent_folder(path: Path):
+    global parent_folder
+    parent_folder = Path(path)
+    ui_log(f"[INFO] Parent folder set: {parent_folder}")
+    _refresh_tree()
+
+def _refresh_tree():
+    global _tree, selected_subfolder
+    tree = _tree
+    if tree is None:
+        return
+    # Remember current selection
+    prev = str(selected_subfolder) if selected_subfolder else None
+    # Clear items
+    for item in tree.get_children(""):
+        tree.delete(item)
+    if not parent_folder or not Path(parent_folder).exists():
+        return
+    for d in list_subfolders_with_videos(Path(parent_folder)):
+        iid = str(d)
+        tree.insert("", "end", iid=iid, text=d.name)
+    # Restore selection if still available
+    if prev and any(prev == iid for iid in tree.get_children("")):
+        try:
+            tree.selection_set(prev)
+        except Exception:
+            pass
+
+def _on_tree_select(event=None):
+    global selected_subfolder
+    tree = _tree
+    if tree is None:
+        return
+    sel = tree.selection()
+    if not sel:
+        return
+    path = Path(sel[0])
+    selected_subfolder = path
+    start_pipeline_with_path(path)
+
+def browse_parent_folder():
+    chosen = filedialog.askdirectory(title="Select parent folder containing subfolders with 360 video(s)")
+    if chosen:
+        _set_parent_folder(Path(chosen))
 
 def browse_folder():
     chosen = filedialog.askdirectory(title="Select folder containing 360 video(s)")
@@ -2322,6 +2464,39 @@ def main():
     progress_sub = ttk.Progressbar(prog_top, orient="horizontal", mode="determinate", length=680)
     progress_sub.pack(pady=(2, 8))
 
+    # ---------- Body: Left (file tree) + Right (tabs) ----------
+    body = Frame(_root, bg=PALETTE["bg"]) ; body.pack(fill=BOTH, expand=True)
+    global _left_panel, _right_panel, _tree
+    _left_panel = Frame(body, bg=PALETTE["bg"], width=280)
+    _left_panel.pack(side="left", fill="y", padx=(12, 8), pady=(0,8))
+    _left_panel.pack_propagate(False)
+    _right_panel = Frame(body, bg=PALETTE["bg"]) ; _right_panel.pack(side="left", fill=BOTH, expand=True)
+
+    # Left: Project Browser
+    Label(_left_panel, text="Project Browser", bg=PALETTE["bg"], fg=PALETTE["fg"], font=("Arial", 11, "bold")).pack(anchor="w", padx=6, pady=(8,4))
+    tree_wrap = Frame(_left_panel, bg=PALETTE["bg"]) ; tree_wrap.pack(fill=BOTH, expand=True)
+    _tree = ttk.Treeview(tree_wrap, show="tree")
+    _tree.pack(side="left", fill=BOTH, expand=True)
+    scroll = ttk.Scrollbar(tree_wrap, orient="vertical", command=_tree.yview)
+    scroll.pack(side="right", fill="y")
+    _tree.configure(yscrollcommand=scroll.set)
+    _tree.bind("<<TreeviewSelect>>", _on_tree_select)
+
+    # Left bottom: Select Parent Folder + Refresh
+    left_bottom = Frame(_left_panel, bg=PALETTE["bg"]) ; left_bottom.pack(fill="x", pady=(8,8))
+    global _select_parent_btn, _refresh_btn
+    _select_parent_btn = Button(left_bottom, text="Select Parent Folder…", command=browse_parent_folder, **_btn_style())
+    _select_parent_btn.pack(side="left", padx=(4,6))
+    _refresh_btn = Button(left_bottom, text="Refresh", command=_refresh_tree, **_btn_style())
+    _refresh_btn.pack(side="left")
+
+    # Hide old browse/last buttons since they moved into the left panel
+    try:
+        browse_btn.pack_forget()
+        last_btn.pack_forget()
+    except Exception:
+        pass
+
     # ---------- Controls ----------
     # Moved to tabs per user request
 
@@ -2336,7 +2511,7 @@ def main():
 
     # ---------- Tabs ----------
     _ensure_preview_vars(reset_with_defaults=True)
-    tabs = ttk.Notebook(_root)
+    tabs = ttk.Notebook(_right_panel)
     tabs.pack(fill=BOTH, expand=True, padx=16, pady=(8, 6))
 
     # Settings tab (first) with grouped sections
@@ -2480,6 +2655,34 @@ def main():
         paths_frame.grid_columnconfigure(1, weight=1)
     except Exception:
         pass
+
+    # --- Output group ---
+    out_group = Frame(settings_tab, bg=PALETTE["bg"], highlightthickness=0)
+    Label(out_group, text="Output", bg=PALETTE["bg"], fg=PALETTE["fg"], font=("Arial", 11, "bold")).pack(anchor="w", padx=8, pady=(12,2))
+    out_group.pack(fill=BOTH)
+
+    out_paths = Frame(out_group, bg=PALETTE["bg"]) ; out_paths.pack(fill=BOTH, pady=(2, 8))
+    Label(out_paths, text="Common Output Folder", bg=PALETTE["bg"], fg=PALETTE["fg"]).grid(row=0, column=0, sticky="w", padx=(16,8), pady=4)
+    global common_output_path_var
+    common_output_path_var = StringVar(value="")
+    out_entry = Entry(out_paths, textvariable=common_output_path_var, width=72)
+    out_entry.grid(row=0, column=1, sticky="we", pady=4)
+    def _browse_common_output():
+        p = filedialog.askdirectory(title="Select common output folder")
+        if p:
+            common_output_path_var.set(p)
+    Button(out_paths, text="Browse", command=_browse_common_output, **_btn_style()).grid(row=0, column=2, padx=(8,0))
+    try:
+        out_paths.grid_columnconfigure(1, weight=1)
+    except Exception:
+        pass
+
+    out_modes = Frame(out_group, bg=PALETTE["bg"]) ; out_modes.pack(anchor="w", fill=BOTH, pady=(0,8))
+    Label(out_modes, text="Mode:", bg=PALETTE["bg"], fg=PALETTE["fg"]).pack(side="left", padx=(16,8))
+    global output_mode_var
+    output_mode_var = StringVar(value="merge")
+    ttk.Radiobutton(out_modes, text="Merge (all videos)", variable=output_mode_var, value="merge").pack(side="left", padx=(0,12))
+    ttk.Radiobutton(out_modes, text="Separate (by video)", variable=output_mode_var, value="separate").pack(side="left")
 
     # Preview tab
     preview_tab = Frame(tabs, bg=PALETTE["bg"])
