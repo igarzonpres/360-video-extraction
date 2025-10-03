@@ -194,29 +194,8 @@ def render_perspective_images(
         ref_idx = 0  # your current default
         logging.info(f"Using built-in get_virtual_rotations() (ref_idx={ref_idx}).")
 
-    # Append extra pano_camera10 view (pitch=10, yaw=10) when fewer than 10 views are configured
-    try:
-        if len(cams_from_pano_rotation) < 10:
-            extra_pitch, extra_yaw = 10.0, 10.0
-            cams_from_pano_rotation.append(
-                Rotation.from_euler("YX", [extra_yaw, extra_pitch], degrees=True).as_matrix()
-            )
-            try:
-                used_pairs.append((extra_pitch, extra_yaw))
-            except Exception:
-                pass
-            logging.info("Added extra pano_camera10 view (pitch=10, yaw=10).")
-    except Exception:
-        pass
-
+    # Build rig config without special-casing a 10th view; views use pano_camera{idx}/ by default
     rig_config = create_pano_rig_config(cams_from_pano_rotation, ref_idx=ref_idx)
-
-    # Ensure the appended extra view is named 'pano_camera10/' for output consistency
-    try:
-        if len(rig_config.cameras) >= 10:
-            rig_config.cameras[-1].image_prefix = "pano_camera10/"
-    except Exception:
-        pass
 
     def write_rc_xmp_sidecar(image_path: Path, R_cam_from_world: np.ndarray, camera: pycolmap.Camera):
         """
@@ -272,11 +251,12 @@ def render_perspective_images(
     )
 
     camera = pano_size = rays_in_cam = None
-    # Collect mapping of image relative names to new-style mask absolute paths (optional consumers)
+    # Collect mapping of image relative names to mask absolute paths (optional consumers)
     mask_mappings = []
     # Optional YOLO panorama masks directory (sibling of input pano dir)
     yolo_pano_mask_dir = pano_image_dir.parent / "masks_YOLO"
-    yolo_colmap_dir = mask_dir.parent / "colmap_masks_yolo"
+    # Output directory for per-view YOLO masks
+    yolo_out_dir = mask_dir.parent / "Yolo_masks"
 
     for pano_name in tqdm(pano_image_names):
         pano_path = pano_image_dir / pano_name
@@ -331,17 +311,6 @@ def render_perspective_images(
             )
 
             image_name = rig_config.cameras[cam_idx].image_prefix + pano_name
-            # Prefix file name with numeric subfolder (or folder name) to ensure uniqueness.
-            _img_rel = Path(image_name)
-            folder = _img_rel.parent.name
-            m = re.search(r"(\d+)$", folder)
-            folder_prefix = m.group(1) if m else folder
-            prefixed_name = f"{folder_prefix}_{_img_rel.name}"
-            image_name = str(_img_rel.parent / prefixed_name)
-
-            # Build mask name as <image_base>.mask.png, avoiding double extensions like .jpg.png
-            _img_rel = Path(image_name)
-            mask_rel = _img_rel.parent / f"{_img_rel.stem}.mask.png"
 
             image_path = output_image_dir / image_name
             image_path.parent.mkdir(exist_ok=True, parents=True)
@@ -354,19 +323,14 @@ def render_perspective_images(
                 R_cam_from_world = cam_from_pano_r.T
                 write_rc_xmp_sidecar(image_path, R_cam_from_world, camera)
 
-            # Write new-style mask (*.mask.png)
-            mask_path = mask_dir / mask_rel
-            mask_path.parent.mkdir(exist_ok=True, parents=True)
-            if not pycolmap.Bitmap.from_array(mask).write(mask_path):
-                raise RuntimeError(f"Cannot write {mask_path}")
-            # Also write legacy COLMAP mask naming into output/colmap_masks/<image_name>.png
-            legacy_mask_root = mask_dir.parent / "colmap_masks"
+            # Write legacy COLMAP mask naming into output/masks/<image_name>.png
+            legacy_mask_root = mask_dir
             legacy_mask_path = legacy_mask_root / f"{image_name}.png"
             legacy_mask_path.parent.mkdir(exist_ok=True, parents=True)
             if not pycolmap.Bitmap.from_array(mask).write(legacy_mask_path):
                 raise RuntimeError(f"Cannot write {legacy_mask_path}")
-            # Record mapping: image relative name (as used by COLMAP) -> mask absolute path (new-style only)
-            mask_mappings.append((image_name, str(mask_path.resolve())))
+            # Record mapping: image relative name (as used by COLMAP) -> mask absolute path
+            mask_mappings.append((image_name, str(legacy_mask_path.resolve())))
 
             # --- NEW: Split YOLO panorama mask into per-view mask if available ---
             try:
@@ -387,13 +351,13 @@ def render_perspective_images(
                             )
                             # Binarize per-view YOLO mask (no intersection with coverage)
                             _, out_mask_for_view = cv2.threshold(mview, 127, 255, cv2.THRESH_BINARY)
-                # Write YOLO-split mask into colmap_masks_yolo only if a YOLO mask was found
+                # Write YOLO-split mask into Yolo_masks only if a YOLO mask was found
                 if out_mask_for_view is not None:
                     # Write requested naming preserving original extension: <image_name>.mask.png
                     _img_rel2 = Path(image_name)
-                    yolo_colmap_out2 = yolo_colmap_dir / _img_rel2.parent / f"{_img_rel2.name}.mask.png"
-                    yolo_colmap_out2.parent.mkdir(exist_ok=True, parents=True)
-                    cv2.imwrite(str(yolo_colmap_out2), out_mask_for_view)
+                    yolo_out2 = yolo_out_dir / _img_rel2.parent / f"{_img_rel2.name}.mask.png"
+                    yolo_out2.parent.mkdir(exist_ok=True, parents=True)
+                    cv2.imwrite(str(yolo_out2), out_mask_for_view)
             except Exception:
                 # Silently skip writing YOLO mask on failure; do not mix with coverage masks
                 pass
@@ -460,21 +424,8 @@ def run(args):
     extraction_options.use_gpu = True
     extraction_options.gpu_index = "0"
 
-    # Prefer YOLO-split mask path only if it contains legacy-named masks (<image_name>.png);
-    # otherwise use legacy colmap_masks (since we now write .mask.png files for YOLO which COLMAP won't read by name)
-    mask_yolo_path = args.output_path / "colmap_masks_yolo"
-    use_yolo = False
-    try:
-        if mask_yolo_path.exists():
-            # Select only if we find at least one legacy-named mask that COLMAP can read directly
-            for p in mask_yolo_path.rglob("*.png"):
-                name = str(p.name).lower()
-                if name.endswith(".jpg.png") or name.endswith(".jpeg.png") or name.endswith(".png.png"):
-                    use_yolo = True
-                    break
-    except Exception:
-        use_yolo = False
-    mask_path = mask_yolo_path if use_yolo else args.output_path / "colmap_masks"
+    # Use legacy COLMAP-readable coverage masks from output/masks
+    mask_path = args.output_path / "masks"
     pycolmap.extract_features(
         database_path,
         image_dir,

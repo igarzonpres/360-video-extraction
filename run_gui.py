@@ -73,7 +73,7 @@ MASKING_PITCH_YAW_PAIRS = [
     (-25, 180),
     (-25, 0),
     (25, 180),
-    (25, 0),  # pano_camera10 extra view
+    (25, 0),  # index 9 (tenth view)
 ]
 MASKING_REF_IDX = 0
 
@@ -99,7 +99,7 @@ NO_MASKING_PITCH_YAW_PAIRS = [
     (-25, 180),
     (-25, 0),
     (25, 180),
-    (25, 0),  # pano_camera10 extra view
+    (25, 0),  # index 9 (tenth view)
 ]
 NO_MASKING_REF_IDX = 0
 
@@ -115,7 +115,7 @@ INVERTED_NO_MASKING_PITCH_YAW_PAIRS = [
     (-32, 0),
     (0, 0),
     (0, -42),
-    (10, 10),  # pano_camera10 extra view
+    (10, 10),  # index 9 (tenth view)
 ]
 
 # Toggle flag controlled by the GUI button
@@ -927,13 +927,10 @@ def _collect_preview_images(preview_out: Path) -> List[Path]:
     found: List[Path] = []
     if not images_root.exists():
         return found
-    # Expect images under pano_camera*/ subfolders; default 0..8, plus 10 if present
+    # Expect images under pano_camera*/ subfolders; default 0..9
     expected = _current_pairs()
     indices: List[int]
-    if len(expected) >= 10:
-        indices = list(range(9)) + [10]
-    else:
-        indices = list(range(9))
+    indices = list(range(min(10, len(expected))))
     for idx in indices:
         sub = images_root / f"pano_camera{idx}"
         if sub.exists():
@@ -1964,9 +1961,8 @@ def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enable
     if not ok:
         ui_log("[ERROR] Rendering step failed. See log.")
         return SplitResult(project_root, seconds_per_frame, masking_enabled, video_count)
-    # Non-destructive copy of images and yolo masks into masked_images
     ui_status("Building masked_images …")
-    merge_masked_images(project_root)
+    
     try:
         mirror_outputs(project_root)
     except Exception:
@@ -2048,51 +2044,6 @@ def mirror_outputs(project_root: Path) -> None:
 # =========================
 # Merge masked_images helper
 # =========================
-
-def merge_masked_images(project_root: Path) -> bool:
-    """Copy the contents of output/images and output/colmap_masks_yolo into
-    output/masked_images, preserving subfolders and filenames. Non-destructive.
-    """
-    try:
-        out_root = Path(project_root) / "output"
-        images_root = out_root / "images"
-        masks_root = out_root / "colmap_masks_yolo"
-        dest_root = out_root / "masked_images"
-
-        def _copy_tree(src_root: Path) -> int:
-            count = 0
-            if not src_root.exists():
-                return 0
-            for p in src_root.rglob("*"):
-                if p.is_dir():
-                    continue
-                rel = p.relative_to(src_root)
-                dst = dest_root / rel
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                if not dst.exists():
-                    try:
-                        shutil.copy2(p, dst)
-                        count += 1
-                    except Exception as e:
-                        ui_log(f"[WARN] Could not copy {p} -> {dst}: {e}")
-                else:
-                    # Do not overwrite existing files; keep both sources intact
-                    pass
-            return count
-
-        dest_root.mkdir(parents=True, exist_ok=True)
-        c1 = _copy_tree(images_root)
-        c2 = _copy_tree(masks_root)
-        ui_log(f"[OK] Copied {c1} image(s) and {c2} mask file(s) into {dest_root}")
-        return True
-    except Exception as e:
-        try:
-            ui_log(f"[WARN] Failed to build masked_images: {e}")
-        except Exception:
-            pass
-        return False
-
-
 
 def _stop_progress_bars():
     try:
