@@ -1353,8 +1353,8 @@ def refresh_action_buttons():
     if split_btn is not None:
         split_btn.configure(state=NORMAL if project_exists else DISABLED)
 
-    align_ready = (_split_result is not None and
-                   Path(_split_result.project_root).exists())
+    # Allow aligning if a valid project folder is selected (even without a prior split in-session)
+    align_ready = project_exists
     if align_btn is not None:
         align_btn.configure(state=NORMAL if align_ready else DISABLED)
 
@@ -1936,6 +1936,50 @@ def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enable
     if masking_enabled:
         ui_status("Writing rotation override (masking)...")
         write_rotation_override(project_root, _current_pairs(), MASKING_REF_IDX)
+        # Also write override into prepared_path(s) so preprojected align finds it later
+        try:
+            mode = output_mode_var.get() if output_mode_var is not None else "merge"
+        except Exception:
+            mode = "merge"
+        # By-video prepared root
+        try:
+            prepared_by_video = Path(project_root) / "output"
+            prepared_by_video.mkdir(parents=True, exist_ok=True)
+            write_rotation_override(prepared_by_video, _current_pairs(), MASKING_REF_IDX)
+            try:
+                ui_log(f"[OK] Wrote rotation_override.json (masking) in {prepared_by_video}")
+            except Exception:
+                pass
+        except Exception:
+            ui_log("[WARN] Could not write rotation_override.json into by-video prepared output.")
+        # If merging into a common folder, also write override into common roots
+        try:
+            if mode == "merge":
+                try:
+                    common_root_txt = common_output_path_var.get().strip() if common_output_path_var is not None else ""
+                except Exception:
+                    common_root_txt = ""
+                if common_root_txt:
+                    common_root = Path(common_root_txt)
+                    # top-level common root
+                    write_rotation_override(common_root, _current_pairs(), MASKING_REF_IDX)
+                    try:
+                        ui_log(f"[OK] Wrote rotation_override.json (masking) in {common_root}")
+                    except Exception:
+                        pass
+                    # prepared common output
+                    try:
+                        prepared_common = common_root / "output"
+                        prepared_common.mkdir(parents=True, exist_ok=True)
+                        write_rotation_override(prepared_common, _current_pairs(), MASKING_REF_IDX)
+                        try:
+                            ui_log(f"[OK] Wrote rotation_override.json (masking) in {prepared_common}")
+                        except Exception:
+                            pass
+                    except Exception:
+                        ui_log("[WARN] Could not write rotation_override.json into common prepared output.")
+        except Exception:
+            pass
         ui_log(f"[OK] Wrote rotation_override.json (masking) in {project_root}")
 
         ui_status("Masking frames (fixed YOLO settings)...")
@@ -1945,6 +1989,45 @@ def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enable
     else:
         ui_status("Writing rotation override (no masking)...")
         write_rotation_override(project_root, _current_pairs(), NO_MASKING_REF_IDX)
+        # Also write override into prepared_path(s) so preprojected align finds it later
+        try:
+            mode = output_mode_var.get() if output_mode_var is not None else "merge"
+        except Exception:
+            mode = "merge"
+        # By-video prepared root
+        try:
+            prepared_by_video = Path(project_root) / "output"
+            prepared_by_video.mkdir(parents=True, exist_ok=True)
+            write_rotation_override(prepared_by_video, _current_pairs(), NO_MASKING_REF_IDX)
+            try:
+                ui_log(f"[OK] Wrote rotation_override.json (no masking) in {prepared_by_video}")
+            except Exception:
+                pass
+        except Exception:
+            ui_log("[WARN] Could not write rotation_override.json into by-video prepared output.")
+        # If merging into a common folder, also write override into common roots
+        if mode == "merge":
+            try:
+                common_root_txt = common_output_path_var.get().strip() if common_output_path_var is not None else ""
+            except Exception:
+                common_root_txt = ""
+            if common_root_txt:
+                common_root = Path(common_root_txt)
+                write_rotation_override(common_root, _current_pairs(), NO_MASKING_REF_IDX)
+                try:
+                    ui_log(f"[OK] Wrote rotation_override.json (no masking) in {common_root}")
+                except Exception:
+                    pass
+                try:
+                    prepared_common = common_root / "output"
+                    prepared_common.mkdir(parents=True, exist_ok=True)
+                    write_rotation_override(prepared_common, _current_pairs(), NO_MASKING_REF_IDX)
+                    try:
+                        ui_log(f"[OK] Wrote rotation_override.json (no masking) in {prepared_common}")
+                    except Exception:
+                        pass
+                except Exception:
+                    ui_log("[WARN] Could not write rotation_override.json into common prepared output.")
         ui_log(f"[OK] Wrote rotation_override.json (no masking) in {project_root}")
 
     # ui_main_progress(33, indeterminate=False)
@@ -1978,36 +2061,183 @@ def run_split_stage(project_root: Path, seconds_per_frame: float, masking_enable
 
 
 
-def run_align_stage(project_root: Path, video_count: int) -> bool:
-    #ui_main_progress(33, indeterminate=False)
-
-    if not run_panorama_sfm(project_root):
-        ui_status("COLMAP failed. See log.")
-        return False
-    # Mirror outputs to common output root if configured (align start)
+def _resolve_alignment_roots(project_root: Path) -> tuple[Path, Path, bool]:
+    """Return (prepared_root, output_path, is_merge_mode)."""
     try:
-        mirror_outputs(project_root)
+        mode = output_mode_var.get() if output_mode_var is not None else "merge"
     except Exception:
-        pass
+        mode = "merge"
+    is_merge = (mode == "merge")
+    if is_merge:
+        try:
+            common_root_txt = common_output_path_var.get().strip() if common_output_path_var is not None else ""
+        except Exception:
+            common_root_txt = ""
+        if not common_root_txt:
+            raise RuntimeError("Common output path not configured for merge mode.")
+        base = Path(common_root_txt)
+        prepared_root = base / "output"
+        output_path = base / "output"
+        return prepared_root, output_path, True
+    else:
+        prepared_root = Path(project_root) / "output"
+        output_path = prepared_root
+        return prepared_root, output_path, False
 
-    #ui_main_progress(66, indeterminate=False)
 
-    delete_pano_camera0(project_root)
-    #ui_main_progress(90, indeterminate=False)
-
-    if video_count > 1:
-        ui_log(f"[INFO] Multiple videos detected ({video_count}). Running segment_images...")
-        run_segment_images(project_root)
-
-    # Mirror again after segmentation/deletion to reflect final state
-    try:
-        mirror_outputs(project_root)
-    except Exception:
-        pass
-    #ui_main_progress(100, indeterminate=False)
-    ui_status("All done.")
-    ui_log("[DONE] Pipeline complete.")
+def _validate_prepared_dataset(prepared_root: Path, strict: bool) -> bool:
+    images_root = prepared_root / "images"
+    masks_root = prepared_root / "masks"
+    ok_images = images_root.exists()
+    ok_masks = masks_root.exists()
+    if not ok_images:
+        msg = f"[{'ERROR' if strict else 'WARN'}] Missing images folder: {images_root}"
+        ui_log(msg)
+        ui_status("Alignment aborted." if strict else "Proceeding with available data.")
+        return not strict
+    # Check presence of any files
+    any_img = any(images_root.rglob("*.jpg")) or any(images_root.rglob("*.png")) or any(images_root.rglob("*.jpeg"))
+    if not any_img:
+        msg = f"[{'ERROR' if strict else 'WARN'}] No images found under {images_root}"
+        ui_log(msg)
+        ui_status("Alignment aborted." if strict else "Proceeding with available data.")
+        return not strict
+    if not ok_masks:
+        msg = f"[{'ERROR' if strict else 'WARN'}] Missing masks folder: {masks_root}"
+        ui_log(msg)
+        return not strict
+    any_mask = any(masks_root.rglob("*.png"))
+    if not any_mask:
+        msg = f"[{'ERROR' if strict else 'WARN'}] No masks found under {masks_root}"
+        ui_log(msg)
+        return not strict
     return True
+
+
+def run_preprojected_align(prepared_root: Path, output_path: Path, matcher: str = "sequential") -> bool:
+    script = Path(__file__).parent / "panorama_sfm_preprojected.py"
+    if not script.exists():
+        ui_log(f"[ERROR] Missing panorama_sfm_preprojected.py next to the GUI: {script}")
+        return False
+    cmd = [
+        sys.executable,
+        str(script),
+        "--prepared_path", str(prepared_root),
+        "--output_path", str(output_path),
+        "--matcher", matcher,
+    ]
+    ui_log(f"[RUN] {' '.join(cmd)}")
+    ui_status("Running preprojected alignment...")
+    ui_sub_progress(0, indeterminate=False)
+    try:
+        import subprocess
+        with subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        ) as proc:
+            # Expose proc for cancellation
+            global _current_proc
+            _current_proc = proc
+            if proc.stdout is not None:
+                for line in proc.stdout:
+                    try:
+                        if cancel_event is not None and cancel_event.is_set():
+                            try:
+                                proc.terminate()
+                            except Exception:
+                                pass
+                            ui_log("[CANCEL] Stopping alignment process...")
+                            break
+                    except Exception:
+                        pass
+                    ui_log(line.rstrip())
+            ret = proc.wait()
+        ui_sub_progress(100, indeterminate=False)
+        try:
+            _current_proc = None
+        except Exception:
+            pass
+        if ret == 0:
+            ui_log("[OK] Preprojected alignment finished.")
+            return True
+        else:
+            ui_log(f"[ERROR] Preprojected alignment exited with code {ret}.")
+            return False
+    except Exception as e:
+        ui_sub_progress(0, indeterminate=False)
+        ui_log(f"[ERROR] Preprojected alignment failed: {e}")
+        return False
+
+
+def run_align_stage(project_root: Path, video_count: int) -> bool:
+    # Resolve prepared/output roots based on saving mode
+    try:
+        prepared_root, output_path, is_merge = _resolve_alignment_roots(project_root)
+    except Exception as e:
+        ui_log(f"[ERROR] {e}")
+        return False
+
+    # Validate dataset presence (strict for by-video, warnings for merge)
+    strict = not is_merge
+    if not _validate_prepared_dataset(prepared_root, strict=strict):
+        if strict:
+            return False
+        else:
+            ui_log("[WARN] Proceeding with available data (merge mode). Results may be incomplete.")
+
+    # Ensure rotation_override.json is discoverable by preprojected aligner
+    try:
+        images_dir = prepared_root / "images"
+        override_in_prepared = (prepared_root / "rotation_override.json").exists() or (images_dir / "rotation_override.json").exists()
+        if not override_in_prepared:
+            if is_merge:
+                # Try from common root first
+                common_root = prepared_root.parent
+                common_top = common_root / "rotation_override.json"
+                src = None
+                if common_top.exists():
+                    src = common_top
+                elif (Path(project_root) / "rotation_override.json").exists():
+                    # Fallback: copy from selected video root
+                    src = Path(project_root) / "rotation_override.json"
+                if src is not None:
+                    try:
+                        dst = prepared_root / "rotation_override.json"
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src, dst)
+                        ui_log(f"[OK] Copied rotation_override.json -> {dst}")
+                    except Exception as ce:
+                        ui_log(f"[WARN] Could not copy rotation_override.json into prepared_root: {ce}")
+                else:
+                    ui_log("[WARN] No rotation_override.json found in common or selected video root; defaults will be used.")
+            else:
+                # By-video: copy from project root if available
+                src = Path(project_root) / "rotation_override.json"
+                if src.exists():
+                    try:
+                        dst = prepared_root / "rotation_override.json"
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src, dst)
+                        ui_log(f"[OK] Copied rotation_override.json -> {dst}")
+                    except Exception as ce:
+                        ui_log(f"[WARN] Could not copy rotation_override.json into prepared_root: {ce}")
+                else:
+                    ui_log("[WARN] No rotation_override.json found in selected video root; defaults will be used.")
+    except Exception as e:
+        ui_log(f"[WARN] Rotation override preflight failed: {e}")
+
+    # Run preprojected alignment in-place (no mirroring in individual mode)
+    # Default matcher is sequential unless a control is provided elsewhere
+    success = run_preprojected_align(prepared_root, output_path, matcher="sequential")
+    if success:
+        ui_status("Alignment complete.")
+    else:
+        ui_status("Alignment failed. See log.")
+    return success
 
 # Mirror the entire output folder to the configured common destination
 def mirror_outputs(project_root: Path) -> None:
@@ -2095,7 +2325,7 @@ def _split_thread(project_root: Path, seconds_per_frame: float, masking_enabled:
 
 
 
-def _align_thread(split_result: SplitResult) -> None:
+def _align_thread(project_root: Path) -> None:
     try:
         try:
             cancel_event.clear()
@@ -2103,7 +2333,7 @@ def _align_thread(split_result: SplitResult) -> None:
             pass
         ui_disable_inputs(True)
         ui_sub_progress(0, indeterminate=False)
-        success = run_align_stage(split_result.project_root, split_result.video_count)
+        success = run_align_stage(project_root, 0)
         if not success:
             ui_log("[WARN] Alignment stage did not complete successfully.")
     except Exception as exc:
@@ -2280,11 +2510,14 @@ def on_start_split():
 
 
 def on_start_align():
-    if _split_result is None:
-        ui_log("[ERROR] Run START spltting before alignment.")
-        return
-
-    project_root = Path(_split_result.project_root)
+    # Resolve project_root from last split result if available; otherwise from the selected folder
+    if _split_result is not None and Path(_split_result.project_root).exists():
+        project_root = Path(_split_result.project_root)
+    else:
+        if _selected_project is None:
+            ui_log("[ERROR] Please select a folder before starting the alignment.")
+            return
+        project_root = Path(_selected_project)
     if not project_root.exists():
         ui_log(f"[ERROR] Project folder is missing: {project_root}")
         ui_status("Alignment aborted. Folder missing.")
@@ -2294,11 +2527,7 @@ def on_start_align():
     if align_btn is not None:
         align_btn.configure(state=DISABLED)
 
-    threading.Thread(
-        target=_align_thread,
-        args=(_split_result,),
-        daemon=True
-    ).start()
+    threading.Thread(target=_align_thread, args=(project_root,), daemon=True).start()
 
 
 def on_masking_toggle():
