@@ -73,7 +73,7 @@ MASKING_PITCH_YAW_PAIRS = [
     (-25, 180),
     (-25, 0),
     (25, 180),
-    (25, 0),  # index 9 (tenth view)
+    # (25, 0),  # index 9 (tenth view)
 ]
 MASKING_REF_IDX = 0
 
@@ -90,33 +90,33 @@ MASKING_REF_IDX = 0
 #     (0, 138), # para la R1 subirlo (142) para evitar que salga el hombro, dejo el default para hacerlo compatible con la X5
 # ]
 NO_MASKING_PITCH_YAW_PAIRS = [
-    (0, 145),   # Reference Pose (ref_idx = 0)
-    (0, 85),
-    (0, 25),
-    (0, -35),
-    (0, -95),
-    (0, -155),
-    (-25, 180),
-    (-25, 0),
-    (25, 180),
-    (25, 0),  # index 9 (tenth view)
+    (0, 90),   # Reference Pose (ref_idx = 0)
+    (0, 30), # View 1
+    (0, -30), # View 2
+    (25, 0), # View 3
+    (-25, 0),  # View 4
+    (0, -155), # View 5
+    (0, 145), # View 6
+    (-25, 180), # View 7
+    (25, 180), # View 8
+    # (25, 0),  # index 9 (tenth view)
 ]
 NO_MASKING_REF_IDX = 0
 
 # Inverted preset (no masking): user-requested alternative angles
 # Format: list of (pitch, yaw) in degrees
-INVERTED_NO_MASKING_PITCH_YAW_PAIRS = [
-    (0, -90),
-    (32, -180),
-    (-42, -180),
-    (0, -138),
-    (0, 155),
-    (42, 0),
-    (-32, 0),
-    (0, 0),
-    (0, -42),
-    (10, 10),  # index 9 (tenth view)
-]
+# INVERTED_NO_MASKING_PITCH_YAW_PAIRS = [
+#     (0, -90),
+#     (32, -180),
+#     (-42, -180),
+#     (0, -138),
+#     (0, 155),
+#     (42, 0),
+#     (-32, 0),
+#     (0, 0),
+#     (0, -42),
+#     (10, 10),  # index 9 (tenth view)
+# ]
 
 # Toggle flag controlled by the GUI button
 inverted_preset_active = False

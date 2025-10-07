@@ -101,7 +101,7 @@ def create_pano_rig_config(
                 cam_from_pano_rotation @ cams_from_pano_rotation[ref_idx].T
             )
 
-            # Views 1–5 = right lens, 6–10 = left lens
+            # Views 1–4 = right lens, 5–8 = left lens
             side = 1 if idx <= 4 else -1
             local_offset = np.array([-baseline * side, 0, 0])
             translation = cam_from_ref_rotation @ local_offset
