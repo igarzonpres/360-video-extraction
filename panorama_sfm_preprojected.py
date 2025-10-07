@@ -211,12 +211,55 @@ def run(args):
     else:
         logging.fatal(f"Unknown matcher: {args.matcher}")
 
+    # Incremental mapping options
     opts = pycolmap.IncrementalPipelineOptions(
         ba_refine_sensor_from_rig=False,
         ba_refine_focal_length=False,
         ba_refine_principal_point=False,
         ba_refine_extra_params=False,
     )
+
+    # Triangulation options (IncrementalTriangulatorOptions)
+    try:
+        tri_opts = pycolmap.IncrementalTriangulatorOptions()
+        # Angles in degrees; reprojection in pixels
+        if getattr(args, "create_max_angle_error", None) is not None:
+            tri_opts.create_max_angle_error = float(args.create_max_angle_error)
+        if getattr(args, "continue_max_angle_error", None) is not None:
+            tri_opts.continue_max_angle_error = float(args.continue_max_angle_error)
+        if getattr(args, "merge_max_reproj_error", None) is not None:
+            tri_opts.merge_max_reproj_error = float(args.merge_max_reproj_error)
+        if getattr(args, "complete_max_reproj_error", None) is not None:
+            tri_opts.complete_max_reproj_error = float(args.complete_max_reproj_error)
+        # Attach to pipeline options
+        try:
+            opts.triangulation = tri_opts
+        except Exception:
+            # Older builds may not expose opts.triangulation; ignore silently
+            pass
+    except Exception:
+        # If the class isn't available, proceed with defaults
+        pass
+
+    # Mapper options (IncrementalMapperOptions)
+    try:
+        mapper_opts = pycolmap.IncrementalMapperOptions()
+        if getattr(args, "filter_max_reproj_error", None) is not None:
+            mapper_opts.filter_max_reproj_error = float(args.filter_max_reproj_error)
+        if getattr(args, "filter_min_tri_angle", None) is not None:
+            mapper_opts.filter_min_tri_angle = float(args.filter_min_tri_angle)
+        if getattr(args, "abs_pose_max_error", None) is not None:
+            mapper_opts.abs_pose_max_error = float(args.abs_pose_max_error)
+        if getattr(args, "abs_pose_min_num_inliers", None) is not None:
+            mapper_opts.abs_pose_min_num_inliers = int(args.abs_pose_min_num_inliers)
+        if getattr(args, "abs_pose_min_inlier_ratio", None) is not None:
+            mapper_opts.abs_pose_min_inlier_ratio = float(args.abs_pose_min_inlier_ratio)
+        try:
+            opts.mapper = mapper_opts
+        except Exception:
+            pass
+    except Exception:
+        pass
     recs = pycolmap.incremental_mapping(database_path, image_dir, rec_path, opts)
     for idx, rec in recs.items():
         logging.info(f"#{idx} {rec.summary()}")
@@ -227,4 +270,14 @@ if __name__ == "__main__":
     parser.add_argument("--prepared_path", type=Path, required=True, help="Root with pre-projected images/masks subfolders.")
     parser.add_argument("--output_path", type=Path, required=True)
     parser.add_argument("--matcher", default="sequential", choices=["sequential", "exhaustive", "vocabtree", "spatial"])
+    # Optional mapping thresholds (alignment only). Leave unset to use pycolmap defaults.
+    parser.add_argument("--create_max_angle_error", type=float, default=None, help="Create phase max angle error in degrees")
+    parser.add_argument("--continue_max_angle_error", type=float, default=None, help="Continue phase max angle error in degrees")
+    parser.add_argument("--merge_max_reproj_error", type=float, default=None, help="Merge phase max reprojection error in pixels")
+    parser.add_argument("--complete_max_reproj_error", type=float, default=None, help="Triangulation complete-phase max reprojection error in pixels")
+    parser.add_argument("--filter_max_reproj_error", type=float, default=None, help="Mapper filter-phase max reprojection error in pixels")
+    parser.add_argument("--filter_min_tri_angle", type=float, default=None, help="Mapper filter-phase min triangulation angle in degrees")
+    parser.add_argument("--abs_pose_max_error", type=float, default=None, help="Mapper abs. pose max reprojection error")
+    parser.add_argument("--abs_pose_min_num_inliers", type=int, default=None, help="Mapper abs. pose min inliers")
+    parser.add_argument("--abs_pose_min_inlier_ratio", type=float, default=None, help="Mapper abs. pose min inlier ratio")
     run(parser.parse_args())

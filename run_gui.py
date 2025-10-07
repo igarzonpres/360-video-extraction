@@ -6,6 +6,8 @@ import cv2
 import time
 import threading
 import subprocess
+import atexit
+from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
 import math
@@ -294,6 +296,27 @@ preview_canvas_window_id = None  # Canvas window id for centering
 pano_start_index_var = None  # StringVar for panorama start index (1-based)
 pano_end_index_var = None    # StringVar for panorama end index (1-based)
 
+# Mapping threshold inputs (set in Splitting tab)
+# Leave empty to inherit defaults; angles in degrees, reprojection in pixels
+global create_max_angle_error_var
+global continue_max_angle_error_var
+global merge_max_reproj_error_var
+global filter_max_reproj_error_var
+global complete_max_reproj_error_var
+global filter_min_tri_angle_var
+global abs_pose_max_error_var
+global abs_pose_min_num_inliers_var
+global abs_pose_min_inlier_ratio_var
+create_max_angle_error_var = None
+continue_max_angle_error_var = None
+merge_max_reproj_error_var = None
+filter_max_reproj_error_var = None
+complete_max_reproj_error_var = None
+filter_min_tri_angle_var = None
+abs_pose_max_error_var = None
+abs_pose_min_num_inliers_var = None
+abs_pose_min_inlier_ratio_var = None
+
 # References to show/hide Photo/Video controls
 pv_fv_row = None
 pv_range_row = None
@@ -315,11 +338,88 @@ def ui_status(msg: str):
     _root.update_idletasks()
 
 def ui_log(msg: str):
-    log_text.configure(state=NORMAL)
-    log_text.insert(END, msg.rstrip() + "\n")
-    log_text.see(END)
-    log_text.configure(state=DISABLED)
-    _root.update_idletasks()
+    # Write to GUI terminal
+    try:
+        log_text.configure(state=NORMAL)
+        log_text.insert(END, msg.rstrip() + "\n")
+        log_text.see(END)
+        log_text.configure(state=DISABLED)
+    except Exception:
+        pass
+    # Also write to session log file
+    try:
+        _session_log_write(msg)
+    except Exception:
+        pass
+    try:
+        _root.update_idletasks()
+    except Exception:
+        pass
+
+# -------------------------
+# Session logging helpers
+# -------------------------
+
+_session_log_path: Path | None = None
+_session_log_fp = None
+_session_log_lock = threading.Lock()
+
+def _session_log_write(line: str) -> None:
+    global _session_log_fp
+    if _session_log_fp is None:
+        return
+    try:
+        with _session_log_lock:
+            _session_log_fp.write((line.rstrip() + "\n"))
+            _session_log_fp.flush()
+    except Exception:
+        pass
+
+def _close_session_log():
+    global _session_log_fp
+    try:
+        if _session_log_fp is not None:
+            _session_log_fp.close()
+    except Exception:
+        pass
+    finally:
+        _session_log_fp = None
+
+def _init_session_log(custom_path: Path | None = None) -> Path | None:
+    """Initialize per-session log file. Returns the path or None on failure."""
+    global _session_log_path, _session_log_fp
+    try:
+        if custom_path is None:
+            base = Path(__file__).parent
+            logs_dir = base / "logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            _session_log_path = logs_dir / f"session-{ts}.log"
+        else:
+            _session_log_path = Path(custom_path)
+            _session_log_path.parent.mkdir(parents=True, exist_ok=True)
+        # Open file in text mode, utf-8
+        _session_log_fp = open(_session_log_path, "a", encoding="utf-8", buffering=1, errors="replace")
+        try:
+            atexit.register(_close_session_log)
+        except Exception:
+            pass
+        return _session_log_path
+    except Exception:
+        _session_log_path = None
+        _session_log_fp = None
+        return None
+
+def set_log_path(path: Path) -> bool:
+    """DEV/Tests: override current session log path. Closes current file."""
+    try:
+        _close_session_log()
+        return _init_session_log(Path(path)) is not None
+    except Exception:
+        return False
+
+def get_log_path() -> Path | None:
+    return _session_log_path
 
 # def ui_main_progress(value: float | None = None, indeterminate: bool = False):
 #     try:
@@ -2119,14 +2219,16 @@ def run_preprojected_align(prepared_root: Path, output_path: Path, matcher: str 
     if not script.exists():
         ui_log(f"[ERROR] Missing panorama_sfm_preprojected.py next to the GUI: {script}")
         return False
-    cmd = [
-        sys.executable,
-        str(script),
-        "--prepared_path", str(prepared_root),
-        "--output_path", str(output_path),
-        "--matcher", matcher,
-    ]
+    cmd = _build_preprojected_align_cmd(prepared_root, output_path, matcher)
     ui_log(f"[RUN] {' '.join(cmd)}")
+    try:
+        # Explicitly log mapper abs_pose-related values seen in the command
+        apme = _cmd_flag_value(cmd, "--abs_pose_max_error")
+        apmni = _cmd_flag_value(cmd, "--abs_pose_min_num_inliers")
+        apmir = _cmd_flag_value(cmd, "--abs_pose_min_inlier_ratio")
+        ui_log(f"[ALIGN-OPTS] abs_pose_max_error={apme} abs_pose_min_num_inliers={apmni} abs_pose_min_inlier_ratio={apmir}")
+    except Exception:
+        pass
     ui_status("Running preprojected alignment...")
     ui_sub_progress(0, indeterminate=False)
     try:
@@ -2238,6 +2340,122 @@ def run_align_stage(project_root: Path, video_count: int) -> bool:
     else:
         ui_status("Alignment failed. See log.")
     return success
+
+
+# -------------------------
+# Alignment command helpers
+# -------------------------
+
+def _parse_float_var(var) -> float | None:
+    try:
+        txt = var.get().strip()
+    except Exception:
+        return None
+    if txt == "":
+        return None
+    try:
+        return float(txt)
+    except Exception:
+        try:
+            ui_log(f"[WARN] Invalid float value ignored: '{txt}'")
+        except Exception:
+            pass
+        return None
+
+def _parse_int_var(var) -> int | None:
+    try:
+        txt = var.get().strip()
+    except Exception:
+        return None
+    if txt == "":
+        return None
+    try:
+        return int(float(txt))
+    except Exception:
+        try:
+            ui_log(f"[WARN] Invalid int value ignored: '{txt}'")
+        except Exception:
+            pass
+        return None
+
+
+def _build_preprojected_align_cmd(prepared_root: Path, output_path: Path, matcher: str = "sequential") -> list[str]:
+    script = Path(__file__).parent / "panorama_sfm_preprojected.py"
+    cmd: list[str] = [
+        sys.executable,
+        str(script),
+        "--prepared_path", str(prepared_root),
+        "--output_path", str(output_path),
+        "--matcher", str(matcher),
+    ]
+    # Append thresholds if provided (units: deg for angles, px for reprojection)
+    try:
+        v = _parse_float_var(create_max_angle_error_var)
+        if v is not None:
+            cmd += ["--create_max_angle_error", str(v)]
+    except Exception:
+        pass
+    try:
+        v = _parse_float_var(continue_max_angle_error_var)
+        if v is not None:
+            cmd += ["--continue_max_angle_error", str(v)]
+    except Exception:
+        pass
+    try:
+        v = _parse_float_var(merge_max_reproj_error_var)
+        if v is not None:
+            cmd += ["--merge_max_reproj_error", str(v)]
+    except Exception:
+        pass
+    # Triangulation: complete_max_reproj_error
+    try:
+        v = _parse_float_var(complete_max_reproj_error_var)
+        if v is not None:
+            cmd += ["--complete_max_reproj_error", str(v)]
+    except Exception:
+        pass
+    # Mapper: filter_max_reproj_error and filter_min_tri_angle
+    try:
+        v = _parse_float_var(filter_max_reproj_error_var)
+        if v is not None:
+            cmd += ["--filter_max_reproj_error", str(v)]
+    except Exception:
+        pass
+    try:
+        v = _parse_float_var(filter_min_tri_angle_var)
+        if v is not None:
+            cmd += ["--filter_min_tri_angle", str(v)]
+    except Exception:
+        pass
+    # Mapper: absolute pose options
+    try:
+        v = _parse_float_var(abs_pose_max_error_var)
+        if v is not None:
+            cmd += ["--abs_pose_max_error", str(v)]
+    except Exception:
+        pass
+    try:
+        v = _parse_int_var(abs_pose_min_num_inliers_var)
+        if v is not None:
+            cmd += ["--abs_pose_min_num_inliers", str(v)]
+    except Exception:
+        pass
+    try:
+        v = _parse_float_var(abs_pose_min_inlier_ratio_var)
+        if v is not None:
+            cmd += ["--abs_pose_min_inlier_ratio", str(v)]
+    except Exception:
+        pass
+    return cmd
+
+def _cmd_flag_value(cmd: list[str], flag: str) -> str:
+    try:
+        i = cmd.index(flag)
+        if i >= 0 and i + 1 < len(cmd):
+            return str(cmd[i + 1])
+    except Exception:
+        pass
+    return "-"
 
 # Mirror the entire output folder to the configured common destination
 def mirror_outputs(project_root: Path) -> None:
@@ -2586,6 +2804,9 @@ def main():
     global ffmpeg_path_var, jpegtran_path_var
     global preview_pano_index_var
     global yolo_model_path, yolo_conf, yolo_dilate_px, yolo_invert_mask, yolo_apply_to_rgb, _yolo_widgets
+    # Mapping thresholds StringVars (set in Splitting tab)
+    global create_max_angle_error_var, continue_max_angle_error_var, merge_max_reproj_error_var, complete_max_reproj_error_var, filter_max_reproj_error_var, filter_min_tri_angle_var
+    global abs_pose_max_error_var, abs_pose_min_num_inliers_var, abs_pose_min_inlier_ratio_var
 
     _root = Tk()
     _root.title("360 Video Dataset Preparation")
@@ -2934,6 +3155,49 @@ def main():
     splitting_tab = Frame(tabs, bg=PALETTE["bg"])
     tabs.add(splitting_tab, text="Splitting")
 
+    # Mapping Thresholds (pycolmap) — alignment only
+    thr_group = Frame(splitting_tab, bg=PALETTE["bg"], highlightthickness=0)
+    Label(thr_group, text="Mapping Thresholds (pycolmap)", bg=PALETTE["bg"], fg=PALETTE["fg"], font=("Arial", 11, "bold")).pack(anchor="w", padx=8, pady=(10,2))
+    thr_group.pack(fill=BOTH, padx=8)
+
+    # Threshold rows; leave empty to use defaults
+    rows = Frame(thr_group, bg=PALETTE["bg"]) ; rows.pack(fill=BOTH, pady=(2,8))
+    # create_max_angle_error (deg)
+    Label(rows, text="create_max_angle_error (deg)", bg=PALETTE["bg"], fg=PALETTE["fg"]).grid(row=0, column=0, sticky="w", padx=(8,8), pady=2)
+    create_max_angle_error_var = StringVar(value="1")
+    Entry(rows, textvariable=create_max_angle_error_var, width=10).grid(row=0, column=1, sticky="w", pady=2)
+    # continue_max_angle_error (deg)
+    Label(rows, text="continue_max_angle_error (deg)", bg=PALETTE["bg"], fg=PALETTE["fg"]).grid(row=1, column=0, sticky="w", padx=(8,8), pady=2)
+    continue_max_angle_error_var = StringVar(value="1")
+    Entry(rows, textvariable=continue_max_angle_error_var, width=10).grid(row=1, column=1, sticky="w", pady=2)
+    # merge_max_reproj_error (px)
+    Label(rows, text="merge_max_reproj_error (px)", bg=PALETTE["bg"], fg=PALETTE["fg"]).grid(row=2, column=0, sticky="w", padx=(8,8), pady=2)
+    merge_max_reproj_error_var = StringVar(value="2")
+    Entry(rows, textvariable=merge_max_reproj_error_var, width=10).grid(row=2, column=1, sticky="w", pady=2)
+    # complete_max_reproj_error (px) — Triangulation
+    Label(rows, text="complete_max_reproj_error (px)", bg=PALETTE["bg"], fg=PALETTE["fg"]).grid(row=3, column=0, sticky="w", padx=(8,8), pady=2)
+    complete_max_reproj_error_var = StringVar(value="2")
+    Entry(rows, textvariable=complete_max_reproj_error_var, width=10).grid(row=3, column=1, sticky="w", pady=2)
+    # filter_max_reproj_error (px) — Mapper
+    Label(rows, text="filter_max_reproj_error (px)", bg=PALETTE["bg"], fg=PALETTE["fg"]).grid(row=4, column=0, sticky="w", padx=(8,8), pady=2)
+    filter_max_reproj_error_var = StringVar(value="2")
+    Entry(rows, textvariable=filter_max_reproj_error_var, width=10).grid(row=4, column=1, sticky="w", pady=2)
+    # filter_min_tri_angle (deg) — Mapper
+    Label(rows, text="filter_min_tri_angle (deg)", bg=PALETTE["bg"], fg=PALETTE["fg"]).grid(row=5, column=0, sticky="w", padx=(8,8), pady=2)
+    filter_min_tri_angle_var = StringVar(value="3")
+    Entry(rows, textvariable=filter_min_tri_angle_var, width=10).grid(row=5, column=1, sticky="w", pady=2)
+
+    # Absolute pose (Mapper) options
+    Label(rows, text="abs_pose_max_error", bg=PALETTE["bg"], fg=PALETTE["fg"]).grid(row=6, column=0, sticky="w", padx=(8,8), pady=2)
+    abs_pose_max_error_var = StringVar(value="12")
+    Entry(rows, textvariable=abs_pose_max_error_var, width=10).grid(row=6, column=1, sticky="w", pady=2)
+    Label(rows, text="abs_pose_min_num_inliers", bg=PALETTE["bg"], fg=PALETTE["fg"]).grid(row=7, column=0, sticky="w", padx=(8,8), pady=2)
+    abs_pose_min_num_inliers_var = StringVar(value="30")
+    Entry(rows, textvariable=abs_pose_min_num_inliers_var, width=10).grid(row=7, column=1, sticky="w", pady=2)
+    Label(rows, text="abs_pose_min_inlier_ratio", bg=PALETTE["bg"], fg=PALETTE["fg"]).grid(row=8, column=0, sticky="w", padx=(8,8), pady=2)
+    abs_pose_min_inlier_ratio_var = StringVar(value="0.25")
+    Entry(rows, textvariable=abs_pose_min_inlier_ratio_var, width=10).grid(row=8, column=1, sticky="w", pady=2)
+
     center_box = Frame(splitting_tab, bg=PALETTE["bg"], width=800, height=460)
     center_box.pack(expand=True)
     center_box.pack_propagate(False)
@@ -2967,6 +3231,14 @@ def main():
     log_text.configure(state=DISABLED)
     # Note: Do NOT globally redirect sys.stdout/stderr to avoid breaking third-party imports (torch/ultralytics).
     # All app logs already go to this Terminal via ui_log; child process output is streamed here too.
+
+    # Initialize session logging now that terminal exists and announce the path
+    try:
+        lp = _init_session_log()
+        if lp is not None:
+            ui_log(f"[LOG] Session log: {lp}")
+    except Exception:
+        pass
 
     refresh_action_buttons()
     # Ensure controls reflect current panorama mode state
